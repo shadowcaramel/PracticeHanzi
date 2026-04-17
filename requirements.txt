@@ -1,0 +1,8 @@
+streamlit
+reportlab
+svglib
+pypinyin
+deep-translator
+requests
+charset-normalizer
+Pillow

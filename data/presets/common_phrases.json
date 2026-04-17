@@ -1,0 +1,12 @@
+[
+  { "zh": "你好", "note": "Hello" },
+  { "zh": "谢谢", "note": "Thanks" },
+  { "zh": "不客气", "note": "You're welcome" },
+  { "zh": "对不起", "note": "Sorry" },
+  { "zh": "没关系", "note": "No problem" },
+  { "zh": "再见", "note": "Goodbye" },
+  { "zh": "早上好", "note": "Good morning" },
+  { "zh": "晚上好", "note": "Good evening" },
+  { "zh": "请问", "note": "May I ask…" },
+  { "zh": "多少钱", "note": "How much?" }
+]
