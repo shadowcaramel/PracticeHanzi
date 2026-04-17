@@ -33,6 +33,9 @@ venv/
 ENV/
 env/
 
+# Cursor (local plans / agent artifacts)
+.cursor/plans/
+
 # IDE / editor
 .idea/
 .vscode/

@@ -25,7 +25,7 @@ A small **Streamlit** web application that builds **printable A4 PDF** practice 
 
 ## Requirements
 
-- **Python 3.10+** (tested with a Conda env named `torchgpu2`; any compatible env is fine).  
+- **Python 3.10+**  
 - **Internet** on first run (font downloads, stroke JSON, translations).  
 - **Disk**: cached data under `fonts/`, `stroke_cache/`, `data/hsk/`, `data/radicals/` (Unihan when you use radicals), and `data/mmh/` (Make Me a Hanzi `dictionary.txt` when you use IDS or MMH gloss), including a ~17 MB **Noto Sans SC** UI font on first PDF generation.
 
@@ -33,27 +33,41 @@ A small **Streamlit** web application that builds **printable A4 PDF** practice 
 
 ## Installation
 
-From the project root (the folder that contains `app.py`):
+From the project root (the folder that contains `app.py`), create a **virtual environment**, activate it, then install dependencies.
 
-```bash
-conda activate torchgpu2
-pip install -r requirements.txt
-```
-
-If you do not use Conda:
+**venv** (recommended; works everywhere Python is installed):
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+```
+
+Activate it:
+
+- **Windows (cmd/PowerShell):** `.venv\Scripts\activate`
+- **macOS / Linux:** `source .venv/bin/activate`
+
+Then:
+
+```bash
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
+
+**Conda** (optional): create and use any env name you like, for example:
+
+```bash
+conda create -n calligraphy-sheets python=3.12 -y
+conda activate calligraphy-sheets
+python -m pip install -r requirements.txt
 ```
 
 ---
 
 ## How to launch
 
+With the same environment **activated**:
+
 ```bash
-conda activate torchgpu2
 streamlit run app.py
 ```
 
@@ -166,4 +180,4 @@ Radical captions use the Unicode **Unihan** database (`kRSUnicode` in `Unihan_IR
 ## Repository maintenance
 
 - Safe to delete `fonts/`, `stroke_cache/`, `data/hsk/`, `data/radicals/`, and `data/mmh/` to force re-download (slower next run).  
-- Do not commit large binaries if you use Git unless you intend to; add `fonts/`, `stroke_cache/`, `data/hsk/`, `data/radicals/`, and `data/mmh/` to `.gitignore` if you prefer a lean repo.
+- The project `.gitignore` excludes downloaded caches, virtual envs, and **Cursor** plan files under `.cursor/plans/` so the repo stays lean; adjust if you want to track any of those paths.
