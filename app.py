@@ -19,6 +19,7 @@ from utils.fonts import (
 )
 from utils.pdf_generator import generate_pdf
 from utils.presets import list_preset_names, load_preset, sample_hsk_words
+from utils.pdf_naming import build_practice_hanzi_pdf_filename
 from utils.segmentation import (
     character_sequence,
     extract_cjk,
@@ -64,6 +65,12 @@ with st.sidebar:
     # Word-bank / HSK buttons queue text updates here (must run before the text widget).
     if "_pending_main_text" in st.session_state:
         st.session_state.main_text = st.session_state.pop("_pending_main_text")
+        if "_pending_pdf_name_source" in st.session_state:
+            st.session_state["pdf_name_source"] = st.session_state.pop("_pending_pdf_name_source")
+        if "_pending_pdf_loaded_snapshot" in st.session_state:
+            st.session_state["pdf_loaded_snapshot"] = st.session_state.pop(
+                "_pending_pdf_loaded_snapshot"
+            )
 
     st.text_area(
         "Chinese text",
@@ -83,7 +90,10 @@ with st.sidebar:
         if _presets:
             _cat = st.selectbox("Preset category", _presets, index=0, key="preset_cat")
             if st.button("Load preset into text box", key="btn_preset_load"):
-                st.session_state._pending_main_text = " ".join(load_preset(_cat))
+                loaded = " ".join(load_preset(_cat))
+                st.session_state._pending_main_text = loaded
+                st.session_state._pending_pdf_name_source = ("preset", _cat)
+                st.session_state._pending_pdf_loaded_snapshot = loaded.strip()
                 st.rerun()
         else:
             st.caption("No preset files found under data/presets/.")
@@ -105,7 +115,10 @@ with st.sidebar:
         if st.button("Load HSK sample into text box", key="btn_hsk"):
             try:
                 chunk = sample_hsk_words(int(_hsk_lvl), int(_hsk_n), randomize=_hsk_rand)
-                st.session_state._pending_main_text = " ".join(chunk)
+                joined = " ".join(chunk)
+                st.session_state._pending_main_text = joined
+                st.session_state._pending_pdf_name_source = ("hsk", int(_hsk_lvl))
+                st.session_state._pending_pdf_loaded_snapshot = joined.strip()
                 st.rerun()
             except Exception as e:
                 st.error(str(e))
@@ -310,8 +323,13 @@ if st.button("Generate PDF", type="primary", use_container_width=True):
                 show_mmh_gloss=show_mmh_gloss,
             )
             st.session_state["pdf_bytes"] = pdf_bytes
-            slug = extract_cjk(text_input) or "".join(chars)
-            st.session_state["pdf_name"] = f"calligraphy_{slug[:40]}.pdf"
+            ti = text_input.strip()
+            pdf_src = None
+            if ti and ti == st.session_state.get("pdf_loaded_snapshot"):
+                pdf_src = st.session_state.get("pdf_name_source")
+            st.session_state["pdf_name"] = build_practice_hanzi_pdf_filename(
+                text_input, source=pdf_src
+            )
             st.success(f"PDF generated — {len(pdf_bytes) / 1024:.0f} KB, {n_pages} page(s)")
         except Exception as exc:
             st.error(f"Generation failed: {exc}")
@@ -321,7 +339,7 @@ if "pdf_bytes" in st.session_state:
     st.download_button(
         label="Download PDF",
         data=st.session_state["pdf_bytes"],
-        file_name=st.session_state.get("pdf_name", "calligraphy.pdf"),
+        file_name=st.session_state.get("pdf_name", "PracticeHanzi.pdf"),
         mime="application/pdf",
         use_container_width=True,
     )
