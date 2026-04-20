@@ -1,7 +1,9 @@
 """Fetch stroke order data from hanzi-writer-data and render SVG sequences."""
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
@@ -33,7 +35,12 @@ def _is_cjk(char: str) -> bool:
 
 
 def fetch_stroke_data(char: str) -> dict | None:
-    """Return stroke JSON for a single character, or None if unavailable."""
+    """Return stroke JSON for a single character, or None if unavailable.
+
+    The on-disk cache is lazily upgraded with a ``svg_strokes`` list of
+    pre-transformed path strings; callers that only need the transformed
+    paths can read them without re-running the parser.
+    """
     if not _is_cjk(char):
         return None
 
@@ -41,7 +48,13 @@ def fetch_stroke_data(char: str) -> dict | None:
     cache_file = CACHE_DIR / f"{ord(char):05X}.json"
 
     if cache_file.exists():
-        return json.loads(cache_file.read_text(encoding="utf-8"))
+        try:
+            return json.loads(cache_file.read_text(encoding="utf-8"))
+        except Exception:
+            try:
+                cache_file.unlink()
+            except Exception:
+                pass
 
     url = CDN_URL.format(char=char)
     try:
@@ -53,6 +66,24 @@ def fetch_stroke_data(char: str) -> dict | None:
         return data
     except Exception:
         return None
+
+
+def _get_transformed_paths(char: str) -> list[str] | None:
+    """Return the transformed SVG path list for *char*, caching on disk."""
+    data = fetch_stroke_data(char)
+    if not data or "strokes" not in data:
+        return None
+    svg_strokes = data.get("svg_strokes")
+    if isinstance(svg_strokes, list) and svg_strokes and all(isinstance(s, str) for s in svg_strokes):
+        return svg_strokes
+    transformed = [_transform_path(p) for p in data["strokes"]]
+    data["svg_strokes"] = transformed
+    try:
+        cache_file = CACHE_DIR / f"{ord(char):05X}.json"
+        cache_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return transformed
 
 
 def prefetch_stroke_json(chars: set[str], *, max_workers: int = 6) -> None:
@@ -78,6 +109,7 @@ def _char_space_y_to_svg_y(y: float) -> float:
     return CHAR_Y_TOP - y
 
 
+@lru_cache(maxsize=4096)
 def _transform_path(d: str) -> str:
     """Convert path coordinates from hanzi-writer character space to SVG coordinates.
 
@@ -147,11 +179,20 @@ def _transform_path(d: str) -> str:
     return "".join(out)
 
 
-def render_stroke_step_svg(strokes: list[str], up_to: int, size: int = 80) -> str:
+def render_stroke_step_svg(
+    strokes: list[str],
+    up_to: int,
+    size: int = 80,
+    *,
+    step_label: int | None = None,
+    transformed: bool = False,
+) -> str:
     """Render an SVG showing strokes[0..up_to-1] in dark, stroke[up_to-1]
     highlighted in red, and remaining strokes in light gray.
 
-    Returns SVG markup as a string.
+    When ``step_label`` is given, its integer value is drawn at the top-left
+    corner of the SVG — useful for printable order diagrams. ``transformed``
+    skips ``_transform_path`` (caller already handled it).
     """
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" '
@@ -160,7 +201,7 @@ def render_stroke_step_svg(strokes: list[str], up_to: int, size: int = 80) -> st
     ]
 
     for i, raw_d in enumerate(strokes):
-        d = _transform_path(raw_d)
+        d = raw_d if transformed else _transform_path(raw_d)
         if i < up_to - 1:
             color = STROKE_COLOR
         elif i == up_to - 1:
@@ -169,22 +210,41 @@ def render_stroke_step_svg(strokes: list[str], up_to: int, size: int = 80) -> st
             color = STROKE_LIGHT
         parts.append(f'<path d="{d}" fill="{color}" />')
 
+    if step_label is not None:
+        parts.append(
+            f'<text x="40" y="160" font-family="sans-serif" '
+            f'font-size="180" font-weight="bold" '
+            f'fill="{HIGHLIGHT_COLOR}" opacity="0.85">{step_label}</text>'
+        )
+
     parts.append("</svg>")
     return "\n".join(parts)
 
 
-def render_stroke_sequence(char: str, cell_size: int = 80) -> list[str] | None:
+def render_stroke_sequence(
+    char: str,
+    cell_size: int = 80,
+    *,
+    number_steps: bool = False,
+) -> list[str] | None:
     """Return a list of SVG strings showing progressive stroke buildup,
-    or None if data is unavailable.
+    or None if data is unavailable. Pass ``number_steps=True`` to stamp a
+    1-based step label in the top-left of each cell.
     """
-    data = fetch_stroke_data(char)
-    if not data or "strokes" not in data:
+    paths = _get_transformed_paths(char)
+    if not paths:
         return None
 
-    strokes = data["strokes"]
+    n = len(paths)
     return [
-        render_stroke_step_svg(strokes, step, size=cell_size)
-        for step in range(1, len(strokes) + 1)
+        render_stroke_step_svg(
+            paths,
+            step,
+            size=cell_size,
+            step_label=step if number_steps else None,
+            transformed=True,
+        )
+        for step in range(1, n + 1)
     ]
 
 
@@ -207,8 +267,28 @@ def render_full_char_svg(char: str, size: int = 80) -> str | None:
     return "\n".join(parts)
 
 
+_DRAWING_CACHE: dict[str, object] = {}
+
+
 def svg_to_drawing(svg_string: str):
-    """Convert an SVG string to a reportlab Drawing using svglib."""
+    """Convert an SVG string to a reportlab Drawing using svglib.
+
+    Parsing SVGs is the slowest single step in stroke-heavy pages. Drawings
+    returned here are memoized by SHA-1 of the SVG source; ``renderPDF.draw``
+    accepts the same Drawing object on any Canvas, so cached results stay
+    valid across pages and jobs.
+    """
+    key = hashlib.sha1(svg_string.encode("utf-8")).hexdigest()
+    cached = _DRAWING_CACHE.get(key)
+    if cached is not None:
+        return cached
     from svglib.svglib import svg2rlg
     bio = BytesIO(svg_string.encode("utf-8"))
-    return svg2rlg(bio)
+    drawing = svg2rlg(bio)
+    if drawing is not None:
+        # Cap cache growth; simple LFU-style prune when it gets large.
+        if len(_DRAWING_CACHE) > 4000:
+            for k in list(_DRAWING_CACHE.keys())[:500]:
+                _DRAWING_CACHE.pop(k, None)
+        _DRAWING_CACHE[key] = drawing
+    return drawing

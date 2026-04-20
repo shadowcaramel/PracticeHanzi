@@ -7,9 +7,9 @@ A small **Streamlit** web application that builds **printable A4 PDF** practice 
 ## Features
 
 - **Page layout (automatic)** — More than one whitespace-separated CJK segment, or multiple lines → **phrase** sheets (one row per segment). A single run without spaces → **character** sheets (one page per character).  
-- **Typefaces** — Pick **script** then **typeface** (several OFL options per bucket where available; some extra faces are JP-influenced Google Fonts—check previews). Pillow preview sample: `汉语很难`. Stroke diagrams only for **楷书** script (hanzi-writer-data).  
+- **Typefaces** — Pick **script** then **typeface** (several OFL options per bucket where available; some extra faces are JP-influenced Google Fonts—check previews). Pillow preview is large, centered, and high-DPI; default sample is `汉语很难`, with a seal-safe `永字八法` used automatically for 篆书 (glyph-coverage fallback avoids tofu squares if a font lacks a glyph). Stroke diagrams only for **楷书** script (hanzi-writer-data).  
 - **All five scripts** — One PDF page per script (楷·行·草·隶·篆); optional per-script typeface overrides in the sidebar.  
-- **Word banks** — Presets under `data/presets/`; **Load** replaces the entire text box (no append).  
+- **Word banks** — Presets under `data/presets/` (Common phrases, Animals, Numbers, Family, Home, **Colors**, **Countries**, **Idioms** 成语). The **Preset category** dropdown shows human-readable labels (`Animals (动物)`, `Idioms (成语)`, …) sorted alphabetically by label; **Load** replaces the entire text box (no append).  
 - **HSK 3.0 (new) sample** — **Load** replaces the text box; **random sample is on by default**; data from [complete-hsk-vocabulary](https://github.com/drkameleon/complete-hsk-vocabulary) (MIT), cached under `data/hsk/`.  
 - **Radicals (optional)** — Checkbox adds a **部首** line using Unicode **Unihan kRSUnicode** (first use downloads `Unihan.zip` from unicode.org into `data/radicals/`, then builds a small JSON cache).  
 - **Stroke order** from [hanzi-writer-data](https://github.com/chanind/hanzi-writer-data) / [Make Me a Hanzi](https://github.com/skishore/makemeahanzi): progressive **楷书** steps; stroke JSON is **prefetched in parallel** before drawing. PDF caption is **“Stroke order”**; full attribution remains in upstream projects.  
@@ -27,7 +27,7 @@ A small **Streamlit** web application that builds **printable A4 PDF** practice 
 
 - **Python 3.10+**  
 - **Internet** on first run (font downloads, stroke JSON, translations).  
-- **Disk**: cached data under `fonts/`, `stroke_cache/`, `data/hsk/`, `data/radicals/` (Unihan when you use radicals), and `data/mmh/` (Make Me a Hanzi `dictionary.txt` when you use IDS or MMH gloss), including a ~17 MB **Noto Sans SC** UI font on first PDF generation.
+- **Disk**: cached data under `fonts/`, `stroke_cache/`, `data/hsk/`, `data/radicals/` (Unihan when you use radicals), `data/mmh/` (Make Me a Hanzi `dictionary.txt` when you use IDS or MMH gloss), and `data/mmh_idioms/` (only if you run the idiom extractor in `scripts/`), including a ~17 MB **Noto Sans SC** UI font on first PDF generation.
 
 ---
 
@@ -113,6 +113,9 @@ data/
   hsk/                 # Cached HSK inclusive lists (created when you use HSK; optional)
   radicals/            # Unihan.zip + kRS BMP cache (optional; first radical use)
   mmh/                 # Make Me a Hanzi dictionary.txt (optional; IDS / MMH gloss)
+  mmh_idioms/          # Cached sfyc23/China-idiom CSV (only when running the idiom extractor)
+scripts/
+  build_idioms_from_china_idiom.py  # Regenerate data/presets/idioms.json
 utils/
   fonts.py             # Typeface registry, download, ReportLab registration, PIL previews
   segmentation.py      # Phrase vs character splitting for PDF layout
@@ -175,9 +178,21 @@ If you use **HSK word samples**, JSON is fetched from [drkameleon/complete-hsk-v
 
 Radical captions use the Unicode **Unihan** database (`kRSUnicode` in `Unihan_IRGSources.txt` inside [Unihan.zip](https://www.unicode.org/Public/zipped/16.0.0/Unihan.zip)). Follow the [Unicode Terms of Use](https://www.unicode.org/copyright.html). Cached files: `data/radicals/Unihan.zip` and `data/radicals/krs_bmp_cache.json`.
 
+### Idioms word bank
+
+The bundled `data/presets/idioms.json` is a small curated subset of widely-taught 4-character 成语, validated against [sfyc23/China-idiom](https://github.com/sfyc23/China-idiom) (MIT License) to confirm each entry exists in an attested open-source corpus. Only the filtered subset is bundled; the upstream CSV (~10 MB) is **not** redistributed here. Other banks (`common_phrases`, `animals`, `numbers`, `family`, `home`, `colors`, `countries`) are hand-curated in this repo.
+
+**How to regenerate `idioms.json`:**
+
+```bash
+python scripts/build_idioms_from_china_idiom.py
+```
+
+The script downloads the upstream CSV into `data/mmh_idioms/` (cached), validates the curated whitelist in `scripts/build_idioms_from_china_idiom.py`, drops any entries that also appear in locally cached HSK lists under `data/hsk/`, and writes the sorted JSON array. Running it twice on the same CSV produces identical output.
+
 ---
 
 ## Repository maintenance
 
-- Safe to delete `fonts/`, `stroke_cache/`, `data/hsk/`, `data/radicals/`, and `data/mmh/` to force re-download (slower next run).  
+- Safe to delete `fonts/`, `stroke_cache/`, `data/hsk/`, `data/radicals/`, `data/mmh/`, and `data/mmh_idioms/` to force re-download (slower next run).  
 - The project `.gitignore` excludes downloaded caches, virtual envs, and **Cursor** plan files under `.cursor/plans/` so the repo stays lean; adjust if you want to track any of those paths.

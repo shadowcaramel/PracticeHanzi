@@ -19,14 +19,39 @@ HSK_INCLUSIVE_NEW_URL = (
 )
 
 
+PRESET_DISPLAY_LABELS: dict[str, str] = {
+    "common_phrases": "Common phrases (常用短语)",
+    "animals":        "Animals (动物)",
+    "numbers":        "Numbers (数字)",
+    "colors":         "Colors (颜色)",
+    "countries":      "Countries (国家)",
+    "idioms":         "Idioms (成语)",
+    "family":         "Family (家人)",
+    "home":           "Home (家)",
+}
+
+
+def preset_label(preset_id: str) -> str:
+    """Human-readable label for a preset id (falls back to a Title-cased stem)."""
+    if preset_id in PRESET_DISPLAY_LABELS:
+        return PRESET_DISPLAY_LABELS[preset_id]
+    return preset_id.replace("_", " ").title()
+
+
 def list_preset_names() -> list[str]:
-    """Return preset ids (filenames without ``.json``) sorted."""
+    """Return preset ids (filenames without ``.json``) sorted by stem (legacy)."""
     if not PRESETS_DIR.is_dir():
         return []
     names: list[str] = []
     for p in sorted(PRESETS_DIR.glob("*.json")):
         names.append(p.stem)
     return names
+
+
+def list_preset_ids_sorted_by_label() -> list[str]:
+    """Return preset ids ordered by their display label (used in UI dropdowns)."""
+    ids = list_preset_names()
+    return sorted(ids, key=lambda pid: preset_label(pid).casefold())
 
 
 def _normalize_entries(raw: object) -> list[str]:

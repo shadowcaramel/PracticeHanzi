@@ -4,6 +4,7 @@ stroke_cache/
 data/hsk/
 data/radicals/
 data/mmh/
+data/mmh_idioms/
 
 # Python
 __pycache__/

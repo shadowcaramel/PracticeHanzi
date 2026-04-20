@@ -46,14 +46,34 @@ def _build_krs_from_zip(zip_bytes: bytes) -> dict[str, str]:
     return out
 
 
+_UNIHAN_MIN_BYTES = 15 * 1024 * 1024   # ≈15 MB; real zip is ~40 MB
+_UNIHAN_MAX_BYTES = 120 * 1024 * 1024  # hard upper cap
+
+
+@lru_cache(maxsize=1)
 def _ensure_krs_cache() -> dict[str, str]:
-    """Map U+XXXX string -> kRSUnicode value (e.g. ``75.3``). BMP CJK Unified Ideographs only."""
+    """Map U+XXXX string -> kRSUnicode value (e.g. ``75.3``). BMP CJK Unified Ideographs only.
+
+    On first call, loads the pre-built cache JSON if present. Otherwise
+    downloads Unihan.zip (with a sanity check on Content-Length to avoid
+    saving an HTML error page as a 40 MB zip), extracts the IRG file and
+    caches the parsed result in ``data/radicals/krs_bmp_cache.json``.
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     if KRS_CACHE.exists():
-        return json.loads(KRS_CACHE.read_text(encoding="utf-8"))
+        try:
+            return json.loads(KRS_CACHE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
 
     try:
         if not UNIHAN_ZIP.exists():
+            head = requests.head(UNIHAN_ZIP_URL, timeout=30, allow_redirects=True)
+            cl = int(head.headers.get("Content-Length") or 0)
+            if cl and not (_UNIHAN_MIN_BYTES <= cl <= _UNIHAN_MAX_BYTES):
+                raise RuntimeError(
+                    f"Unihan.zip size {cl} bytes is outside sanity range; refusing download"
+                )
             resp = requests.get(UNIHAN_ZIP_URL, timeout=180)
             resp.raise_for_status()
             UNIHAN_ZIP.write_bytes(resp.content)

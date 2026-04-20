@@ -1,6 +1,10 @@
 import io
-import requests
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Iterable
+
+import requests
 
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -157,6 +161,7 @@ TYPEFACES: list[dict] = [
 ]
 
 _registered: set[str] = set()
+_register_lock = threading.Lock()
 _TYPEFACE_BY_ID = {t["id"]: t for t in TYPEFACES}
 
 # Full Unicode UI font (Latin with tone marks, Cyrillic, CJK for style labels).
@@ -170,12 +175,33 @@ _LABEL_FONT_URL = (
 SCRIPT_ORDER = list(FONT_REGISTRY.keys())
 
 
+# Valid opening bytes of TTF / OTF / TrueType Collection files.
+_TTF_MAGIC = (b"\x00\x01\x00\x00", b"OTTO", b"ttcf", b"true", b"typ1")
+
+
+def _is_valid_font_file(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except Exception:
+        return False
+    return any(head.startswith(m) for m in _TTF_MAGIC)
+
+
 def _download_font(url: str, dest: Path, timeout: int = 60) -> None:
     resp = requests.get(url, timeout=timeout, stream=True)
     resp.raise_for_status()
     with open(dest, "wb") as f:
         for chunk in resp.iter_content(chunk_size=1 << 16):
             f.write(chunk)
+    if not _is_valid_font_file(dest):
+        try:
+            dest.unlink()
+        except Exception:
+            pass
+        raise RuntimeError(
+            f"Downloaded file is not a valid TTF/OTF: {url}"
+        )
 
 
 def get_typeface(typeface_id: str) -> dict:
@@ -232,12 +258,45 @@ def ensure_typeface(typeface_id: str) -> str:
     FONTS_DIR.mkdir(parents=True, exist_ok=True)
     path = FONTS_DIR / info["filename"]
 
-    if not path.exists():
+    if not path.exists() or not _is_valid_font_file(path):
         _download_font(info["url"], path)
 
-    pdfmetrics.registerFont(TTFont(font_name, str(path)))
-    _registered.add(font_name)
+    with _register_lock:
+        if font_name not in _registered:
+            pdfmetrics.registerFont(TTFont(font_name, str(path)))
+            _registered.add(font_name)
     return font_name
+
+
+def ensure_all_typefaces_parallel(ids: Iterable[str], max_workers: int = 5) -> dict[str, str]:
+    """Parallel download + sequential register (pdfmetrics is not thread-safe).
+
+    Safe to call with already-registered ids; they just return immediately.
+    Use this for cold-start all-styles runs where five different TTFs would
+    otherwise be downloaded one at a time.
+    """
+    ids = list(ids)
+    to_download: list[tuple[str, Path, str]] = []
+    for tid in ids:
+        info = get_typeface(tid)
+        path = FONTS_DIR / info["filename"]
+        if not path.exists() or not _is_valid_font_file(path):
+            to_download.append((info["url"], path, tid))
+
+    if to_download:
+        FONTS_DIR.mkdir(parents=True, exist_ok=True)
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="font-dl") as pool:
+            futs = [pool.submit(_download_font, url, dest) for url, dest, _ in to_download]
+            for f in as_completed(futs):
+                try:
+                    f.result()
+                except Exception:
+                    pass
+
+    out: dict[str, str] = {}
+    for tid in ids:
+        out[tid] = ensure_typeface(tid)
+    return out
 
 
 def typeface_font_path(typeface_id: str) -> Path:
@@ -286,31 +345,98 @@ def ensure_label_font() -> str:
     return _LABEL_FONT_NAME
 
 
+_SEAL_SAFE_SAMPLE = "永字八法"
+
+
+def _font_covers_all(font, text: str) -> bool:
+    """True if every glyph in *text* is rendered by *font* (no tofu)."""
+    for ch in text:
+        try:
+            if font.getlength(ch) <= 0:
+                return False
+            mask = font.getmask(ch)
+            if mask is None or mask.getbbox() is None:
+                return False
+        except Exception:
+            return False
+    return True
+
+
 def render_typeface_preview_png(
     typeface_id: str,
     sample: str = "汉语很难",
-    height_px: int = 56,
+    height_px: int = 120,
+    pad: int = 12,
+    scale: int = 2,
+    *,
+    bg: tuple[int, int, int] | None = (250, 250, 250),
+    fg: tuple[int, int, int] = (20, 20, 20),
 ) -> bytes:
-    """Raster preview for Streamlit (Pillow)."""
+    """Raster preview for Streamlit.
+
+    The canvas is sized from the actual text bbox (short samples are no
+    longer floating in a huge image, long samples never clip). The text is
+    centered on both axes. For typefaces whose font file does not cover the
+    sample glyphs (common with seal-script fonts that omit simplifieds like
+    ``汉`` / ``难``), we fall back to a known-good seal sample or — failing
+    that — to the kaishu UI font so the preview never shows tofu squares.
+
+    Rendering is performed at *scale*x resolution internally and downscaled
+    with LANCZOS so the PNG looks crisp on high-DPI displays.
+    """
     from PIL import Image, ImageDraw, ImageFont
 
     ensure_typeface(typeface_id)
     path = typeface_font_path(typeface_id)
-    pad = 8
-    img = Image.new("RGB", (420, height_px + pad * 2), "white")
-    draw = ImageDraw.Draw(img)
+
+    scale = max(1, int(scale))
+    work_h = height_px * scale
+    work_pad = pad * scale
+    font_size = int(work_h * 0.72)
+
     try:
-        font = ImageFont.truetype(str(path), size=int(height_px * 0.72))
+        font = ImageFont.truetype(str(path), size=font_size)
     except OSError:
         font = ImageFont.load_default()
 
+    # Glyph-coverage fallback chain: requested sample -> seal-safe sample ->
+    # kaishu label font with the original sample.
     text = sample
-    bbox = draw.textbbox((0, 0), text, font=font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    x = pad
-    y = pad + (height_px - th) // 2 - bbox[1]
-    draw.text((x, y), text, font=font, fill=(20, 20, 20))
+    if not _font_covers_all(font, text):
+        if _font_covers_all(font, _SEAL_SAFE_SAMPLE):
+            text = _SEAL_SAFE_SAMPLE
+        else:
+            try:
+                label_path = FONTS_DIR / _LABEL_FONT_FILE
+                if not label_path.exists():
+                    ensure_label_font()
+                font = ImageFont.truetype(str(label_path), size=font_size)
+            except OSError:
+                pass
+
+    probe = Image.new("RGB", (4, 4))
+    pdraw = ImageDraw.Draw(probe)
+    bbox = pdraw.textbbox((0, 0), text, font=font)
+    tw = max(1, bbox[2] - bbox[0])
+    th = max(1, bbox[3] - bbox[1])
+
+    img_w = tw + 2 * work_pad
+    img_h = max(work_h, th) + 2 * work_pad
+
+    if bg is None:
+        img = Image.new("RGBA", (img_w, img_h), (0, 0, 0, 0))
+        fill = (fg[0], fg[1], fg[2], 255)
+    else:
+        img = Image.new("RGB", (img_w, img_h), bg)
+        fill = fg
+    draw = ImageDraw.Draw(img)
+
+    x = (img_w - tw) // 2 - bbox[0]
+    y = (img_h - th) // 2 - bbox[1]
+    draw.text((x, y), text, font=font, fill=fill)
+
+    if scale > 1:
+        img = img.resize((img_w // scale, img_h // scale), Image.LANCZOS)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")

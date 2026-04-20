@@ -1,11 +1,20 @@
 """Generate printable A4 PDF calligraphy training sheets using reportlab."""
 
-from io import BytesIO
+from __future__ import annotations
+
+import hashlib
+import json
 import math
+import pickle
+from datetime import date
+from functools import lru_cache
+from io import BytesIO
+from pathlib import Path
+from typing import Callable, Iterable
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
-from reportlab.lib.colors import Color, HexColor, black
+from reportlab.lib.colors import Color, HexColor, black, white
 from reportlab.pdfgen.canvas import Canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.graphics import renderPDF
@@ -13,13 +22,18 @@ from reportlab.graphics import renderPDF
 from utils.fonts import (
     FONT_REGISTRY,
     default_typeface_id_for_script,
+    ensure_all_typefaces_parallel,
     ensure_label_font,
     ensure_typeface,
     get_typeface,
 )
 from utils.stroke_order import prefetch_stroke_json, render_stroke_sequence, svg_to_drawing
-from utils.pinyin_utils import get_pinyin
-from utils.translation import get_translations
+from utils.pinyin_utils import get_pinyin, get_pinyin_per_char
+from utils.translation import (
+    get_translations,
+    prefetch_translations,
+    save_translation_cache_now,
+)
 from utils.radicals import radical_caption
 from utils.decomposition import (
     decomposition_lines,
@@ -28,23 +42,37 @@ from utils.decomposition import (
     phrase_mmh_gloss,
 )
 from utils.segmentation import character_sequence, phrase_segments, is_cjk
+from utils.pdf_options import PdfJobOptions
+from utils import palette as P
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+PDF_CACHE_DIR = BASE_DIR / "data" / "pdf_cache"
+PDF_CACHE_MAX_BYTES = 200 * 1024 * 1024
+# Bump when font/layout changes should invalidate cached PDFs.
+FONTS_VERSION = "v2"
 
 PAGE_W, PAGE_H = A4
 MARGIN = 15 * mm
 
-GRID_LIGHT = HexColor("#BBBBBB")
-GRID_MID = HexColor("#DDDDDD")
-GHOST_ALPHA = 0.15
+GRID_LIGHT = P.GRID_EDGE
+GRID_MID = P.GRID_CROSS
+GHOST_ALPHA = 0.20
 
 
+ProgressFn = Callable[[float, str], None]
+
+
+# ---------------------------------------------------------------------------
+# Grid styles
+# ---------------------------------------------------------------------------
 def _draw_tian_grid(c: Canvas, x: float, y: float, size: float) -> None:
-    """Draw a 田字格 (field-character grid) cell at (x, y) bottom-left."""
+    """田字格 (field-character grid)."""
     c.setStrokeColor(GRID_LIGHT)
-    c.setLineWidth(0.7)
+    c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
     c.setStrokeColor(GRID_MID)
-    c.setLineWidth(0.4)
-    c.setDash(3, 3)
+    c.setLineWidth(0.35)
+    c.setDash([1, 3])
     half = size / 2
     c.line(x + half, y, x + half, y + size)
     c.line(x, y + half, x + size, y + half)
@@ -52,13 +80,13 @@ def _draw_tian_grid(c: Canvas, x: float, y: float, size: float) -> None:
 
 
 def _draw_mi_grid(c: Canvas, x: float, y: float, size: float) -> None:
-    """Draw a 米字格 (rice-character grid) cell at (x, y) bottom-left."""
+    """米字格 (rice-character grid)."""
     c.setStrokeColor(GRID_LIGHT)
-    c.setLineWidth(0.7)
+    c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
     c.setStrokeColor(GRID_MID)
-    c.setLineWidth(0.4)
-    c.setDash(3, 3)
+    c.setLineWidth(0.35)
+    c.setDash([1, 3])
     half = size / 2
     c.line(x + half, y, x + half, y + size)
     c.line(x, y + half, x + size, y + half)
@@ -67,31 +95,45 @@ def _draw_mi_grid(c: Canvas, x: float, y: float, size: float) -> None:
     c.setDash()
 
 
+def _draw_hui_grid(c: Canvas, x: float, y: float, size: float) -> None:
+    """回字格: outer square + concentric inner square at 1/6 inset."""
+    c.setStrokeColor(GRID_LIGHT)
+    c.setLineWidth(0.8)
+    c.rect(x, y, size, size, stroke=1, fill=0)
+    inset = size / 6.0
+    c.setStrokeColor(GRID_MID)
+    c.setLineWidth(0.5)
+    c.rect(x + inset, y + inset, size - 2 * inset, size - 2 * inset, stroke=1, fill=0)
+
+
 def _draw_plain_grid(c: Canvas, x: float, y: float, size: float) -> None:
     c.setStrokeColor(GRID_LIGHT)
-    c.setLineWidth(0.7)
+    c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
 
 
 GRID_FUNCS = {
     "tian": _draw_tian_grid,
     "mi": _draw_mi_grid,
+    "hui": _draw_hui_grid,
     "plain": _draw_plain_grid,
 }
 
-# Practice grid: vertical budget (matches stroke_low → "Practice:" → first row spacing).
+
+# Practice grid: vertical budget.
 PRACTICE_HEADER_BEFORE_GRID = 5 * mm + 5 * mm
 ROW_GAP_PRACTICE = 2 * mm
 PRACTICE_CELL_MIN = 16.0
-BOTTOM_SAFE_PT = 10.0
-# Use compact 3-column Pinyin/EN/RU when display size is at or above this (phrase mode).
+BOTTOM_SAFE_PT = 24.0  # leave room for the footer stripe
 COMPACT_METADATA_CHAR_PT = 100
 
 
+# ---------------------------------------------------------------------------
+# Small text helpers
+# ---------------------------------------------------------------------------
 def _truncate_to_width_canvas(
     c: Canvas, font_name: str, font_size: float, text: str, max_w: float
 ) -> str:
-    """Truncate *text* with ellipsis so it fits *max_w* in the current font metrics."""
     if c.stringWidth(text, font_name, font_size) <= max_w:
         return text
     ell = "…"
@@ -106,31 +148,51 @@ def _truncate_to_width_canvas(
     return text[:lo] + ell if lo > 0 else ell
 
 
+@lru_cache(maxsize=8192)
+def _char_fits_font(font_name: str, char: str) -> bool:
+    """Cached: does *font_name* have a glyph for *char*?"""
+    try:
+        font = pdfmetrics.getFont(font_name)
+        if hasattr(font, "face") and hasattr(font.face, "charWidths"):
+            return ord(char) in font.face.charWidths
+        w = font.stringWidth(char, 10)
+        return w > 0
+    except Exception:
+        return True
+
+
 def _practice_cell_and_rows(
     stroke_low: float, practice_rows: int, char_box_cap: float
-) -> tuple[float, int]:
-    """Shrink practice cell and optionally row count so the grid fits above the bottom margin."""
-    ref = stroke_low - PRACTICE_HEADER_BEFORE_GRID
-    avail = ref - MARGIN - BOTTOM_SAFE_PT
+) -> tuple[float, int, int]:
+    """Return ``(cell_size, rows_drawn, rows_requested)``.
+
+    Policy: keep practice cells at the nominal size (= top-character box) so
+    they visually echo the model glyph; when vertical space is tight, **drop
+    rows** instead of shrinking cells. Callers can compare the last two
+    numbers and surface a UI warning when the layout couldn't honor the
+    requested row count.
+
+    Only as a last resort — when a single nominal row cannot fit — do we
+    scale the cell down to fit exactly one row.
+    """
+    avail = stroke_low - PRACTICE_HEADER_BEFORE_GRID - MARGIN - BOTTOM_SAFE_PT
     want = max(1, practice_rows)
+    nominal = max(PRACTICE_CELL_MIN, char_box_cap)
+
     if avail <= 0:
-        return max(12.0, min(char_box_cap, PRACTICE_CELL_MIN)), 1
-    for r in range(want, 0, -1):
-        inner = avail - (r - 1) * ROW_GAP_PRACTICE
-        if inner <= 0:
-            continue
-        cell_fit = inner / r
-        cell = min(char_box_cap, cell_fit)
-        cell = max(PRACTICE_CELL_MIN, cell)
-        total = r * cell + (r - 1) * ROW_GAP_PRACTICE
-        if total <= avail:
-            return cell, r
-    cell = max(PRACTICE_CELL_MIN, min(char_box_cap, avail))
-    return cell, 1
+        return max(12.0, PRACTICE_CELL_MIN), 0, want
+
+    rows_at_nominal = int((avail + ROW_GAP_PRACTICE) // (nominal + ROW_GAP_PRACTICE))
+    if rows_at_nominal >= want:
+        return nominal, want, want
+    if rows_at_nominal >= 1:
+        return nominal, rows_at_nominal, want
+
+    cell = max(PRACTICE_CELL_MIN, min(nominal, avail))
+    return cell, 1, want
 
 
 def _phrase_cells_per_row(usable_w: float, gap: float, practice_cell: float, n: int) -> int:
-    """Prefer whole-phrase widths: columns are a multiple of *n* when possible."""
     if practice_cell + gap <= 0:
         return max(1, n)
     max_cells = max(1, int((usable_w + gap) // (practice_cell + gap)))
@@ -140,6 +202,106 @@ def _phrase_cells_per_row(usable_w: float, gap: float, practice_cell: float, n: 
     return max_cells
 
 
+def _collect_job_cjk_chars(items: list[tuple[str, str]]) -> set[str]:
+    out: set[str] = set()
+    for kind, payload in items:
+        if kind == "char" and is_cjk(payload):
+            out.add(payload)
+        elif kind == "phrase":
+            for ch in payload:
+                if is_cjk(ch):
+                    out.add(ch)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Page chrome (header rule, footer stripe, script badge, page N / M)
+# ---------------------------------------------------------------------------
+def _draw_page_chrome(
+    c: Canvas,
+    *,
+    label_font: str,
+    script_key: str,
+    page_num: int,
+    page_total: int,
+    page_pinyin: str | None = None,
+    draw_ribbon: bool = False,
+) -> None:
+    """Header rule + optional pinyin, script badge top-right, footer stripe + page numbers."""
+    top_y = PAGE_H - MARGIN + 2
+    c.setStrokeColor(P.INK_SOFT)
+    c.setLineWidth(0.6)
+    c.line(MARGIN, top_y + 14, PAGE_W - MARGIN, top_y + 14)
+
+    if page_pinyin:
+        c.setFont(label_font, 10)
+        c.setFillColor(P.INK_MUTED)
+        c.drawRightString(PAGE_W - MARGIN, top_y + 18, page_pinyin)
+
+    badge_color = P.SCRIPT_COLORS.get(script_key, P.ACCENT)
+    badge = P.SCRIPT_SHORT.get(script_key, "?")
+    bw, bh = 18, 18
+    bx = PAGE_W - MARGIN - bw
+    by = PAGE_H - MARGIN + 16
+    c.setFillColor(badge_color)
+    c.roundRect(bx, by, bw, bh, 3, stroke=0, fill=1)
+    c.setFillColor(white)
+    c.setFont(label_font, 11)
+    c.drawCentredString(bx + bw / 2, by + bh / 2 - 4, badge)
+
+    if draw_ribbon:
+        c.setFillColor(badge_color)
+        c.rect(0, MARGIN, 4, PAGE_H - 2 * MARGIN, stroke=0, fill=1)
+
+    # Footer
+    foot_y = MARGIN - 8
+    c.setStrokeColor(P.GRID_EDGE)
+    c.setLineWidth(0.3)
+    c.line(MARGIN, foot_y + 10, PAGE_W - MARGIN, foot_y + 10)
+    c.setFont(label_font, 7)
+    c.setFillColor(P.INK_MUTED)
+    today = date.today().isoformat()
+    c.drawString(MARGIN, foot_y, f"PracticeHanzi · {today}")
+    c.drawRightString(PAGE_W - MARGIN, foot_y, f"{page_num} / {page_total}")
+
+
+def _draw_script_typeface_header(
+    c: Canvas,
+    *,
+    label_font: str,
+    script_label: str,
+    typeface_label: str,
+    cursor_y: float,
+) -> float:
+    c.setFont(label_font, 14)
+    c.setFillColor(P.INK_SOFT)
+    c.drawString(MARGIN, cursor_y - 14, script_label)
+    c.setFont(label_font, 11)
+    c.setFillColor(P.INK_MUTED)
+    c.drawString(MARGIN, cursor_y - 30, typeface_label)
+    return cursor_y - 38
+
+
+def _draw_ghost_char(
+    c: Canvas, char: str, font_name: str, x: float, y: float, size: float, alpha: float = GHOST_ALPHA
+) -> None:
+    """Draw a faint tracing guide character centered in a grid cell."""
+    if alpha <= 0.001:
+        return
+    c.saveState()
+    c.setFillColor(Color(0, 0, 0, alpha=alpha))
+    font_size = size * 0.85
+    c.setFont(font_name, font_size)
+    tw = c.stringWidth(char, font_name, font_size)
+    tx = x + (size - tw) / 2
+    ty = y + (size - font_size) / 2 + font_size * 0.1
+    c.drawString(tx, ty, char)
+    c.restoreState()
+
+
+# ---------------------------------------------------------------------------
+# Metadata block (phrase pages)
+# ---------------------------------------------------------------------------
 def _draw_phrase_metadata_block(
     c: Canvas,
     *,
@@ -156,7 +318,6 @@ def _draw_phrase_metadata_block(
     compact: bool,
     show_mmh_gloss: bool,
 ) -> float:
-    """Draw pinyin / EN / RU / optional MMH gloss; return updated info_y (lower on page)."""
     info_line_h = max(14.0, inner_fs * 0.2)
     translations = get_translations(
         phrase, need_en=show_english, need_ru=show_russian
@@ -174,11 +335,11 @@ def _draw_phrase_metadata_block(
     ):
         pieces: list[tuple[str, HexColor]] = []
         if show_pinyin and py:
-            pieces.append((f"Pinyin: {py}", HexColor("#1565C0")))
+            pieces.append((f"Pinyin: {py}", P.PINYIN))
         if show_english and en:
-            pieces.append((f"EN: {en}", HexColor("#2E7D32")))
+            pieces.append((f"EN: {en}", P.EN))
         if show_russian and ru:
-            pieces.append((f"RU: {ru}", HexColor("#6A1B9A")))
+            pieces.append((f"RU: {ru}", P.RU))
         if pieces:
             col_w = usable_w / len(pieces)
             fs = max(7.5, min(9.0, inner_fs * 0.11))
@@ -200,24 +361,24 @@ def _draw_phrase_metadata_block(
     if not drew_compact:
         if show_pinyin and py:
             c.setFont(label_font, max(10.0, inner_fs * 0.12))
-            c.setFillColor(HexColor("#1565C0"))
+            c.setFillColor(P.PINYIN)
             c.drawString(margin_x, info_y - 12, f"Pinyin: {py}")
             info_y -= info_line_h + 4
         fs = max(9.0, inner_fs * 0.1)
         c.setFont(label_font, fs)
         if show_english and en:
-            c.setFillColor(HexColor("#2E7D32"))
+            c.setFillColor(P.EN)
             c.drawString(margin_x, info_y - 12, f"EN: {en}")
             info_y -= info_line_h
         if show_russian and ru:
-            c.setFillColor(HexColor("#6A1B9A"))
+            c.setFillColor(P.RU)
             c.drawString(margin_x, info_y - 12, f"RU: {ru}")
             info_y -= info_line_h
 
     if mmh_line:
         mfs = max(8.0, inner_fs * 0.09)
         c.setFont(label_font, mfs)
-        c.setFillColor(HexColor("#5D4037"))
+        c.setFillColor(P.IDS)
         mt = _truncate_to_width_canvas(c, label_font, mfs, mmh_line, usable_w - 2)
         c.drawString(margin_x, info_y - 12, mt)
         info_y -= info_line_h
@@ -225,135 +386,296 @@ def _draw_phrase_metadata_block(
     return info_y
 
 
-def _char_fits_font(font_name: str, char: str) -> bool:
-    """Check if the given font contains a glyph for *char*."""
+# ---------------------------------------------------------------------------
+# Whole-PDF cache (hashed on a PdfJobOptions)
+# ---------------------------------------------------------------------------
+def _pdf_cache_key(options: PdfJobOptions) -> str:
+    blob = pickle.dumps((FONTS_VERSION, options), protocol=4)
+    return hashlib.sha1(blob).hexdigest()
+
+
+def _pdf_cache_get(key: str) -> bytes | None:
+    p = PDF_CACHE_DIR / f"{key}.pdf"
+    if p.is_file():
+        try:
+            data = p.read_bytes()
+            p.touch()
+            return data
+        except Exception:
+            return None
+    return None
+
+
+def _pdf_cache_get_warnings(key: str) -> list[str]:
+    p = PDF_CACHE_DIR / f"{key}.warnings.json"
+    if not p.is_file():
+        return []
     try:
-        font = pdfmetrics.getFont(font_name)
-        if hasattr(font, "face") and hasattr(font.face, "charWidths"):
-            return ord(char) in font.face.charWidths
-        w = font.stringWidth(char, 10)
-        return w > 0
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            return [str(x) for x in payload]
     except Exception:
-        return True
+        pass
+    return []
 
 
-def _collect_job_cjk_chars(items: list[tuple[str, str]]) -> set[str]:
-    out: set[str] = set()
-    for kind, payload in items:
-        if kind == "char" and is_cjk(payload):
-            out.add(payload)
-        elif kind == "phrase":
-            for ch in payload:
-                if is_cjk(ch):
-                    out.add(ch)
-    return out
+def _pdf_cache_put(key: str, data: bytes, warnings: list[str] | None = None) -> None:
+    try:
+        PDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        (PDF_CACHE_DIR / f"{key}.pdf").write_bytes(data)
+        side = PDF_CACHE_DIR / f"{key}.warnings.json"
+        if warnings:
+            side.write_text(json.dumps(list(warnings), ensure_ascii=False), encoding="utf-8")
+        elif side.exists():
+            try:
+                side.unlink()
+            except Exception:
+                pass
+        _pdf_cache_evict()
+    except Exception:
+        pass
 
 
-def _draw_script_typeface_header(
+def _pdf_cache_evict() -> None:
+    """LRU-by-mtime cap so the cache directory never grows past 200 MB."""
+    try:
+        entries = sorted(
+            PDF_CACHE_DIR.glob("*.pdf"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        total = sum(p.stat().st_size for p in entries)
+        while total > PDF_CACHE_MAX_BYTES and entries:
+            victim = entries.pop(0)
+            try:
+                total -= victim.stat().st_size
+                victim.unlink()
+            except Exception:
+                break
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Cover page (Phase 5a)
+# ---------------------------------------------------------------------------
+def _draw_cover_page(
     c: Canvas,
     *,
     label_font: str,
-    script_label: str,
-    typeface_label: str,
-    cursor_y: float,
-) -> float:
-    """Draw script line then typeface line; return updated cursor_y (baseline of last line)."""
-    c.setFont(label_font, 14)
-    c.setFillColor(HexColor("#37474F"))
-    c.drawString(MARGIN, cursor_y - 14, script_label)
-    c.setFont(label_font, 11)
-    c.setFillColor(HexColor("#546E7A"))
-    c.drawString(MARGIN, cursor_y - 30, typeface_label)
-    return cursor_y - 38
-
-
-def _draw_ghost_char(
-    c: Canvas, char: str, font_name: str, x: float, y: float, size: float
+    items: list[tuple[str, str]],
+    options: PdfJobOptions,
+    page_total: int,
 ) -> None:
-    """Draw a faint tracing guide character centered in a grid cell."""
-    c.saveState()
-    c.setFillColor(Color(0, 0, 0, alpha=GHOST_ALPHA))
-    font_size = size * 0.85
-    c.setFont(font_name, font_size)
-    tw = c.stringWidth(char, font_name, font_size)
-    tx = x + (size - tw) / 2
-    ty = y + (size - font_size) / 2 + font_size * 0.1
-    c.drawString(tx, ty, char)
-    c.restoreState()
+    c.setFillColor(P.ACCENT)
+    c.rect(0, PAGE_H - 80, PAGE_W, 80, stroke=0, fill=1)
+
+    c.setFillColor(white)
+    c.setFont(label_font, 24)
+    c.drawString(MARGIN, PAGE_H - 50, "PracticeHanzi")
+    c.setFont(label_font, 11)
+    c.drawString(MARGIN, PAGE_H - 68, "Chinese calligraphy training sheets")
+
+    y = PAGE_H - 120
+    c.setFillColor(P.INK)
+    c.setFont(label_font, 14)
+    c.drawString(MARGIN, y, f"Generated {date.today().isoformat()}")
+    y -= 20
+
+    c.setFont(label_font, 11)
+    c.setFillColor(P.INK_SOFT)
+    c.drawString(MARGIN, y, f"Total pages: {page_total}")
+    y -= 14
+    c.drawString(MARGIN, y, f"Content units: {len(items)} ({options.layout_mode} mode)")
+    y -= 14
+    if options.all_styles:
+        c.drawString(MARGIN, y, "Scripts: 楷 · 行 · 草 · 隶 · 篆")
+    else:
+        try:
+            tid = options.typeface_id or default_typeface_id_for_script(options.style_key)
+            c.drawString(MARGIN, y, f"Typeface: {get_typeface(tid)['label']}")
+        except Exception:
+            pass
+    y -= 22
+
+    # Item grid — tight and readable.
+    c.setFillColor(P.INK)
+    c.setFont(label_font, 10)
+    c.drawString(MARGIN, y, "Included:")
+    y -= 16
+
+    # Use the calligraphy typeface for item glyphs when available.
+    try:
+        preview_font = ensure_typeface(
+            options.typeface_id or default_typeface_id_for_script("kaishu")
+        )
+    except Exception:
+        preview_font = label_font
+
+    payloads = [p for _, p in items]
+    fs = 14
+    c.setFont(preview_font, fs)
+    col_w = 70
+    line_h = 20
+    x = MARGIN
+    y_cursor = y
+    max_per_line = max(1, int((PAGE_W - 2 * MARGIN) // col_w))
+    for i, p in enumerate(payloads):
+        if y_cursor < MARGIN + 80:
+            c.setFont(label_font, 9)
+            c.setFillColor(P.INK_MUTED)
+            c.drawString(MARGIN, y_cursor, f"… and {len(payloads) - i} more")
+            break
+        col = i % max_per_line
+        if col == 0 and i > 0:
+            y_cursor -= line_h
+        c.setFont(preview_font, fs)
+        c.setFillColor(P.INK)
+        c.drawString(MARGIN + col * col_w, y_cursor, p or "·")
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+def _options_from_legacy_kwargs(text: str, kw: dict) -> PdfJobOptions:
+    return PdfJobOptions.from_kwargs(text=text, **kw)
 
 
 def generate_pdf(
-    text: str,
+    text: str | None = None,
     *,
-    typeface_id: str | None = None,
-    style_key: str = "kaishu",
-    typefaces_by_script: dict[str, str] | None = None,
-    layout_mode: str = "character",
-    show_strokes: bool = True,
-    show_radicals: bool = False,
-    show_decomposition: bool = False,
-    show_pinyin: bool = True,
-    show_english: bool = True,
-    show_russian: bool = True,
-    grid_type: str = "tian",
-    practice_rows: int = 3,
-    char_size_pt: int = 120,
-    all_styles: bool = False,
-    compact_metadata: bool = True,
-    show_mmh_gloss: bool = False,
+    options: PdfJobOptions | None = None,
+    progress: ProgressFn | None = None,
+    use_cache: bool = True,
+    warnings_out: list[str] | None = None,
+    **legacy_kwargs,
 ) -> bytes:
     """Generate a complete PDF and return it as bytes.
 
-    layout_mode: ``character`` — one page per non-whitespace character (legacy).
-    ``phrase`` — one page per whitespace-separated CJK phrase (see ``phrase_segments``).
-
-    Pick a font with ``typeface_id`` (see ``TYPEFACES`` in ``utils.fonts``), or leave it
-    ``None`` and pass ``style_key`` to use each script’s default typeface.
-
-    When ``all_styles`` is True, optional ``typefaces_by_script`` maps each script key to a
-    typeface id (defaults apply for missing keys).
-
-    ``compact_metadata`` (phrase pages): when True and ``char_size_pt`` ≥ 100, try one-row
-    Pinyin / EN / RU; otherwise stacked lines. ``show_mmh_gloss``: optional per-character
-    MMH English gloss line on phrase pages.
+    Modern call sites should build a :class:`PdfJobOptions` and pass
+    ``options=...``. The legacy keyword form (``generate_pdf(text,
+    show_strokes=True, ...)``) is still accepted and converted internally;
+    this keeps existing tests / snippets working.
     """
+    if options is None:
+        if text is None:
+            raise TypeError("generate_pdf() requires `text` or `options=`")
+        options = _options_from_legacy_kwargs(text, legacy_kwargs)
+    elif text is not None and text != options.text:
+        # Caller passed text= alongside options; prefer explicit text.
+        options = PdfJobOptions.from_kwargs(
+            text=text,
+            **{
+                f.name: getattr(options, f.name)
+                for f in options.__dataclass_fields__.values()
+                if f.name != "text"
+            },
+        )
 
+    def _progress(p: float, msg: str) -> None:
+        if progress:
+            try:
+                progress(max(0.0, min(1.0, p)), msg)
+            except Exception:
+                pass
+
+    if use_cache:
+        key = _pdf_cache_key(options)
+        hit = _pdf_cache_get(key)
+        if hit is not None:
+            if warnings_out is not None:
+                warnings_out.extend(_pdf_cache_get_warnings(key))
+            _progress(1.0, "Loaded cached PDF")
+            return hit
+    else:
+        key = None
+
+    _progress(0.02, "Preparing fonts")
     ensure_label_font()
 
-    buf = BytesIO()
-    c = Canvas(buf, pagesize=A4)
+    if options.all_styles:
+        tmap = options.typefaces_by_script_dict() or {}
+        style_jobs: list[tuple[str, str]] = [
+            (sk, tmap.get(sk, default_typeface_id_for_script(sk))) for sk in FONT_REGISTRY.keys()
+        ]
+        ensure_all_typefaces_parallel([tid for _, tid in style_jobs])
+    else:
+        tid = options.typeface_id or default_typeface_id_for_script(options.style_key)
+        sk = get_typeface(tid)["script"]
+        style_jobs = [(sk, tid)]
+        ensure_typeface(tid)
 
     kaishu_fallback_id = default_typeface_id_for_script("kaishu")
     kaishu_fallback_font = ensure_typeface(kaishu_fallback_id)
 
-    if all_styles:
-        tmap = typefaces_by_script or {}
-        style_jobs: list[tuple[str, str]] = [
-            (sk, tmap.get(sk, default_typeface_id_for_script(sk))) for sk in FONT_REGISTRY.keys()
-        ]
-    else:
-        tid = typeface_id or default_typeface_id_for_script(style_key)
-        sk = get_typeface(tid)["script"]
-        style_jobs = [(sk, tid)]
-
-    if layout_mode == "phrase":
-        phrases = phrase_segments(text)
+    # Build item list once.
+    if options.layout_mode == "phrase":
+        phrases = phrase_segments(options.text)
         if not phrases:
             phrases = [""]
         items: list[tuple[str, str]] = [("phrase", p) for p in phrases if p]
         if not items:
             items = [("phrase", "")]
     else:
-        chars = character_sequence(text)
+        chars = character_sequence(options.text)
         items = [("char", ch) for ch in chars]
 
     job_cjk = _collect_job_cjk_chars(items)
-    if show_strokes:
+
+    # Prefetch passes.
+    _progress(0.15, "Translating")
+    texts_for_translation: list[str] = []
+    if options.layout_mode == "phrase":
+        texts_for_translation.extend(p for _, p in items)
+    else:
+        texts_for_translation.extend(p for _, p in items)
+    prefetch_translations(
+        texts_for_translation,
+        need_en=options.show_english,
+        need_ru=options.show_russian,
+    )
+
+    _progress(0.30, "Fetching stroke data")
+    if options.show_strokes:
         prefetch_stroke_json(job_cjk)
-    if show_decomposition or show_mmh_gloss:
+    if options.show_decomposition or options.show_mmh_gloss:
         ensure_decomposition_data()
-    for _, tid in style_jobs:
-        ensure_typeface(tid)
+
+    # Canvas setup with compression + metadata.
+    buf = BytesIO()
+    c = Canvas(buf, pagesize=A4, pageCompression=1, invariant=1)
+    c.setTitle(f"PracticeHanzi — {options.text[:30]}" if options.text else "PracticeHanzi")
+    c.setAuthor("PracticeHanzi")
+    c.setCreator("PracticeHanzi")
+    c.setSubject(f"{options.layout_mode} practice")
+
+    page_total = len(style_jobs) * len(items) + (1 if options.cover_page else 0)
+    page_num = 0
+
+    if options.cover_page:
+        page_num += 1
+        label_font = ensure_label_font()
+        try:
+            _draw_cover_page(
+                c,
+                label_font=label_font,
+                items=items,
+                options=options,
+                page_total=page_total,
+            )
+        except Exception:
+            pass
+        _draw_page_chrome(
+            c,
+            label_font=label_font,
+            script_key="kaishu",
+            page_num=page_num,
+            page_total=page_total,
+            draw_ribbon=options.all_styles,
+        )
+        c.showPage()
+
+    draw_base = 0.30
+    draw_span = 0.65
 
     for script_key, tid in style_jobs:
         font_name = ensure_typeface(tid)
@@ -362,54 +684,78 @@ def generate_pdf(
         typeface_label = get_typeface(tid)["label"]
 
         for kind, payload in items:
-            if kind == "char":
-                _draw_character_page(
-                    c,
-                    char=payload,
-                    font_name=font_name,
-                    fallback_font=fallback_font,
-                    script_label=script_label,
-                    typeface_label=typeface_label,
-                    style_key=script_key,
-                    show_strokes=show_strokes,
-                    show_radicals=show_radicals,
-                    show_decomposition=show_decomposition,
-                    show_pinyin=show_pinyin,
-                    show_english=show_english,
-                    show_russian=show_russian,
-                    grid_type=grid_type,
-                    practice_rows=practice_rows,
-                    char_size_pt=char_size_pt,
+            page_num += 1
+            if page_total > 0:
+                _progress(
+                    draw_base + draw_span * (page_num / page_total),
+                    f"Drawing page {page_num} / {page_total}",
                 )
-            else:
-                if not payload.strip():
-                    continue
-                _draw_phrase_page(
-                    c,
-                    phrase=payload,
-                    font_name=font_name,
-                    fallback_font=fallback_font,
-                    script_label=script_label,
-                    typeface_label=typeface_label,
-                    style_key=script_key,
-                    show_strokes=show_strokes,
-                    show_radicals=show_radicals,
-                    show_decomposition=show_decomposition,
-                    show_pinyin=show_pinyin,
-                    show_english=show_english,
-                    show_russian=show_russian,
-                    grid_type=grid_type,
-                    practice_rows=practice_rows,
-                    char_size_pt=char_size_pt,
-                    compact_metadata=compact_metadata,
-                    show_mmh_gloss=show_mmh_gloss,
-                )
+            try:
+                if kind == "char":
+                    _draw_character_page(
+                        c,
+                        char=payload,
+                        font_name=font_name,
+                        fallback_font=fallback_font,
+                        script_label=script_label,
+                        typeface_label=typeface_label,
+                        script_key=script_key,
+                        options=options,
+                        warnings_out=warnings_out,
+                    )
+                else:
+                    if not payload.strip():
+                        continue
+                    _draw_phrase_page(
+                        c,
+                        phrase=payload,
+                        font_name=font_name,
+                        fallback_font=fallback_font,
+                        script_label=script_label,
+                        typeface_label=typeface_label,
+                        script_key=script_key,
+                        options=options,
+                        warnings_out=warnings_out,
+                    )
+            except Exception as exc:
+                _draw_error_page(c, payload=payload, err=str(exc), label_font=ensure_label_font())
+
+            page_pinyin = get_pinyin(payload) if payload else None
+            _draw_page_chrome(
+                c,
+                label_font=ensure_label_font(),
+                script_key=script_key,
+                page_num=page_num,
+                page_total=page_total,
+                page_pinyin=page_pinyin,
+                draw_ribbon=options.all_styles,
+            )
             c.showPage()
 
+    _progress(0.98, "Finalizing")
     c.save()
-    return buf.getvalue()
+    data = buf.getvalue()
+
+    save_translation_cache_now()
+    if key is not None:
+        _pdf_cache_put(key, data, warnings_out)
+
+    _progress(1.0, "Done")
+    return data
 
 
+def _draw_error_page(c: Canvas, *, payload: str, err: str, label_font: str) -> None:
+    c.setFont(label_font, 12)
+    c.setFillColor(HexColor("#C62828"))
+    c.drawString(MARGIN, PAGE_H - MARGIN - 20, f"Could not render “{payload}”")
+    c.setFont(label_font, 9)
+    c.setFillColor(P.INK_MUTED)
+    c.drawString(MARGIN, PAGE_H - MARGIN - 36, err[:200])
+
+
+# ---------------------------------------------------------------------------
+# Phrase page
+# ---------------------------------------------------------------------------
 def _draw_phrase_page(
     c: Canvas,
     *,
@@ -418,20 +764,22 @@ def _draw_phrase_page(
     fallback_font: str,
     script_label: str,
     typeface_label: str,
-    style_key: str,
-    show_strokes: bool,
-    show_radicals: bool,
-    show_decomposition: bool,
-    show_pinyin: bool,
-    show_english: bool,
-    show_russian: bool,
-    grid_type: str,
-    practice_rows: int,
-    char_size_pt: int,
-    compact_metadata: bool,
-    show_mmh_gloss: bool,
+    script_key: str,
+    options: PdfJobOptions,
+    warnings_out: list[str] | None = None,
 ) -> None:
-    """One row of character cells for *phrase*, compact stroke blocks, phrase-wide practice rows."""
+    show_strokes = options.show_strokes
+    show_radicals = options.show_radicals
+    show_decomposition = options.show_decomposition
+    show_pinyin = options.show_pinyin
+    show_english = options.show_english
+    show_russian = options.show_russian
+    grid_type = options.grid_type
+    practice_rows = options.practice_rows
+    char_size_pt = options.char_size_pt
+    compact_metadata = options.compact_metadata
+    show_mmh_gloss = options.show_mmh_gloss
+
     usable_w = PAGE_W - 2 * MARGIN
     label_font = ensure_label_font()
     cursor_y = PAGE_H - MARGIN
@@ -461,6 +809,23 @@ def _draw_phrase_page(
     start_x = MARGIN + (usable_w - row_width) / 2
     char_box_y = cursor_y - char_box_size
 
+    # Per-character pinyin above the row.
+    if show_pinyin:
+        py_pairs = get_pinyin_per_char(phrase)
+        py_map = {ch: py for ch, py in py_pairs if py}
+        pfs = max(8.0, min(11.0, inner_fs * 0.12))
+        c.setFont(label_font, pfs)
+        c.setFillColor(P.PINYIN)
+        for i, ch in enumerate(phrase_chars):
+            py = py_map.get(ch, "")
+            if not py:
+                continue
+            cx = start_x + i * (char_box_size + gap)
+            tw = c.stringWidth(py, label_font, pfs)
+            if tw <= char_box_size - 2:
+                tx = cx + (char_box_size - tw) / 2
+                c.drawString(tx, char_box_y + char_box_size + 2, py)
+
     for i, ch in enumerate(phrase_chars):
         active_font = font_name if _char_fits_font(font_name, ch) else fallback_font
         c.setFillColor(black)
@@ -474,11 +839,11 @@ def _draw_phrase_page(
         ty = char_box_y + (char_box_size - inner_fs) / 2 + inner_fs * 0.1
         c.drawString(tx, ty, ch)
 
-    show_stroke_block = show_strokes and style_key == "kaishu"
+    show_stroke_block = show_strokes and script_key == "kaishu"
     if show_decomposition and not show_stroke_block:
-        fy = max(6.0, min(8.0, char_box_size * 0.18))
+        fy = max(6.0, min(8.5, char_box_size * 0.18))
         c.setFont(label_font, fy)
-        c.setFillColor(HexColor("#6D4C41"))
+        c.setFillColor(P.IDS)
         for i, ch in enumerate(phrase_chars):
             cid = ids_compact(ch)
             if not cid:
@@ -486,9 +851,8 @@ def _draw_phrase_page(
             cx = start_x + i * (char_box_size + gap)
             tw = c.stringWidth(cid, label_font, fy)
             tx = cx + max(0, (char_box_size - tw) / 2)
-            c.drawString(tx, char_box_y - 8, cid)
+            c.drawString(tx, char_box_y - 10, cid)
 
-    # --- Metadata: full phrase below the row (compact 3-col or stacked) ---
     info_y = char_box_y - 10
     info_y = _draw_phrase_metadata_block(
         c,
@@ -508,7 +872,6 @@ def _draw_phrase_page(
 
     column_low = min(char_box_y, info_y - 18)
 
-    # --- Compact stroke order: 楷书 only ---
     stroke_low = column_low
     if show_stroke_block:
         stroke_cell = max(14.0, min(22.0, char_box_size * 0.22))
@@ -516,36 +879,46 @@ def _draw_phrase_page(
         max_per_row = max(1, int((usable_w + stroke_gap) // (stroke_cell + stroke_gap)))
 
         c.setFont(label_font, 9.0)
-        c.setFillColor(HexColor("#555555"))
+        c.setFillColor(P.STROKE_CAPTION)
         head_bl = column_low - 8
         c.drawString(MARGIN, head_bl, "Stroke order")
         stroke_low = head_bl - 14
 
+        # Duplicates (e.g. 爸爸) only need their stroke order / radical / IDS once.
+        _seen: set[str] = set()
+        unique_chars: list[str] = []
         for ch in phrase_chars:
+            if ch not in _seen:
+                _seen.add(ch)
+                unique_chars.append(ch)
+
+        for ch in unique_chars:
             sub_head = stroke_low - 6
             c.setFont(label_font, 9.0)
-            c.setFillColor(HexColor("#555555"))
+            c.setFillColor(P.STROKE_CAPTION)
             c.drawString(MARGIN, sub_head, f"{ch}:")
             y_meta = sub_head - 11
             if show_radicals:
                 cap = radical_caption(ch)
                 if cap:
                     c.setFont(label_font, 8.0)
-                    c.setFillColor(HexColor("#666666"))
+                    c.setFillColor(P.RADICAL)
                     c.drawString(MARGIN, y_meta, cap)
-                    c.setFillColor(HexColor("#555555"))
+                    c.setFillColor(P.STROKE_CAPTION)
                     y_meta -= 12
             if show_decomposition:
                 dlines = decomposition_lines(ch)
                 if dlines:
                     c.setFont(label_font, 8.0)
-                    c.setFillColor(HexColor("#6D4C41"))
+                    c.setFillColor(P.IDS)
                     for dline in dlines:
                         c.drawString(MARGIN, y_meta, dline)
                         y_meta -= 11
             label_baseline = y_meta - 3
 
-            stroke_svgs = render_stroke_sequence(ch, cell_size=int(stroke_cell))
+            stroke_svgs = render_stroke_sequence(
+                ch, cell_size=int(stroke_cell), number_steps=True
+            )
             if not stroke_svgs:
                 stroke_low = label_baseline - 12
                 continue
@@ -570,36 +943,46 @@ def _draw_phrase_page(
             block_bottom = row0_bottom - (n_rows - 1) * row_h - 6
             stroke_low = block_bottom
 
-    # --- Practice: tile phrase across usable width; ghosts on first row ---
+    # Practice grid.
     cursor_y = stroke_low - 5 * mm
-
     c.setFont(label_font, 11)
-    c.setFillColor(HexColor("#555555"))
+    c.setFillColor(P.STROKE_CAPTION)
     c.drawString(MARGIN, cursor_y, "Practice:")
     cursor_y -= 5 * mm
 
     grid_draw = GRID_FUNCS.get(grid_type, _draw_tian_grid)
-    cell_size, eff_rows = _practice_cell_and_rows(
+    cell_size, eff_rows, req_rows = _practice_cell_and_rows(
         stroke_low, practice_rows, char_box_size
     )
     cells_per_row = _phrase_cells_per_row(usable_w, gap, cell_size, n)
     pr_row_w = cells_per_row * cell_size + (cells_per_row - 1) * gap
     start_practice_x = MARGIN + (usable_w - pr_row_w) / 2
+    if warnings_out is not None and eff_rows < req_rows:
+        warnings_out.append(
+            f"«{phrase}»: fit {eff_rows} of {req_rows} practice rows — lower "
+            f"character size or reduce practice rows to use all of them."
+        )
 
+    base_alpha = options.ghost_opacity
     for row in range(eff_rows):
         row_y = cursor_y - cell_size
         if row_y < MARGIN:
             break
+        # Fade ghosts across rows: row0 full, row1 ~60%, row2 ~20%, row3+ none.
+        row_alpha = max(0.0, base_alpha * (1.0 - row * 0.45))
         for col in range(cells_per_row):
             cx = start_practice_x + col * (cell_size + gap)
             grid_draw(c, cx, row_y, cell_size)
-            if row == 0:
+            if row_alpha > 0:
                 ch = phrase_chars[col % n]
                 active_font = font_name if _char_fits_font(font_name, ch) else fallback_font
-                _draw_ghost_char(c, ch, active_font, cx, row_y, cell_size)
+                _draw_ghost_char(c, ch, active_font, cx, row_y, cell_size, alpha=row_alpha)
         cursor_y = row_y - ROW_GAP_PRACTICE
 
 
+# ---------------------------------------------------------------------------
+# Character page
+# ---------------------------------------------------------------------------
 def _draw_character_page(
     c: Canvas,
     *,
@@ -608,17 +991,20 @@ def _draw_character_page(
     fallback_font: str,
     script_label: str,
     typeface_label: str,
-    style_key: str,
-    show_strokes: bool,
-    show_radicals: bool,
-    show_decomposition: bool,
-    show_pinyin: bool,
-    show_english: bool,
-    show_russian: bool,
-    grid_type: str,
-    practice_rows: int,
-    char_size_pt: int,
+    script_key: str,
+    options: PdfJobOptions,
+    warnings_out: list[str] | None = None,
 ) -> None:
+    show_strokes = options.show_strokes
+    show_radicals = options.show_radicals
+    show_decomposition = options.show_decomposition
+    show_pinyin = options.show_pinyin
+    show_english = options.show_english
+    show_russian = options.show_russian
+    grid_type = options.grid_type
+    practice_rows = options.practice_rows
+    char_size_pt = options.char_size_pt
+
     usable_w = PAGE_W - 2 * MARGIN
     label_font = ensure_label_font()
     cursor_y = PAGE_H - MARGIN
@@ -631,7 +1017,6 @@ def _draw_character_page(
         cursor_y=cursor_y,
     )
 
-    # --- Main character display ---
     active_font = font_name if _char_fits_font(font_name, char) else fallback_font
     c.setFillColor(black)
     c.setFont(active_font, char_size_pt)
@@ -648,7 +1033,16 @@ def _draw_character_page(
     ty = char_box_y + (char_box_size - char_size_pt) / 2 + char_size_pt * 0.1
     c.drawString(tx, ty, char)
 
-    # --- Right column: pinyin + translations (same scale as main = readable) ---
+    if show_decomposition:
+        cid = ids_compact(char)
+        if cid:
+            fy = max(8.0, min(10.0, char_box_size * 0.09))
+            c.setFont(label_font, fy)
+            c.setFillColor(P.IDS)
+            ids_tw = c.stringWidth(cid, label_font, fy)
+            ids_tx = char_box_x + (char_box_size - ids_tw) / 2
+            c.drawString(ids_tx, char_box_y - 10, cid)
+
     info_x = char_box_x + char_box_size + 5 * mm
     info_y = cursor_y
     info_line_h = max(16.0, char_size_pt * 0.14)
@@ -656,7 +1050,7 @@ def _draw_character_page(
     if show_pinyin:
         py = get_pinyin(char)
         c.setFont(label_font, max(11.0, char_size_pt * 0.11))
-        c.setFillColor(HexColor("#1565C0"))
+        c.setFillColor(P.PINYIN)
         c.drawString(info_x, info_y - 12, f"Pinyin: {py}")
         info_y -= info_line_h + 4
 
@@ -664,7 +1058,7 @@ def _draw_character_page(
         rc = radical_caption(char)
         if rc:
             c.setFont(label_font, max(9.0, char_size_pt * 0.09))
-            c.setFillColor(HexColor("#455A64"))
+            c.setFillColor(P.RADICAL)
             c.drawString(info_x, info_y - 12, rc)
             info_y -= info_line_h
 
@@ -673,7 +1067,7 @@ def _draw_character_page(
         if dlines:
             dfs = max(8.5, char_size_pt * 0.085)
             c.setFont(label_font, dfs)
-            c.setFillColor(HexColor("#6D4C41"))
+            c.setFillColor(P.IDS)
             step = max(12.0, char_size_pt * 0.095)
             for dline in dlines:
                 c.drawString(info_x, info_y - 12, dline)
@@ -684,31 +1078,30 @@ def _draw_character_page(
         fs = max(10.0, char_size_pt * 0.095)
         c.setFont(label_font, fs)
         if show_english and translations["en"]:
-            c.setFillColor(HexColor("#2E7D32"))
+            c.setFillColor(P.EN)
             c.drawString(info_x, info_y - 12, f"EN: {translations['en']}")
             info_y -= info_line_h
         if show_russian and translations["ru"]:
-            c.setFillColor(HexColor("#6A1B9A"))
+            c.setFillColor(P.RU)
             c.drawString(info_x, info_y - 12, f"RU: {translations['ru']}")
             info_y -= info_line_h
 
-    # Lowest y touched by the top row (character box vs. right-column text)
     column_low = min(char_box_y, info_y - 18)
 
-    # --- Stroke order: only for 楷书 (kaishu); open data is MMH / hanzi-writer regular script ---
     stroke_low = column_low
-    show_stroke_block = show_strokes and style_key == "kaishu"
+    show_stroke_block = show_strokes and script_key == "kaishu"
     if show_stroke_block:
-        # Smaller than main box; paths are Make Me a Hanzi / hanzi-writer regular script.
         stroke_cell = max(28.0, min(char_box_size * 0.36, usable_w * 0.10))
         stroke_gap = max(3.0, stroke_cell * 0.08)
         max_per_row = max(1, int((usable_w + stroke_gap) // (stroke_cell + stroke_gap)))
 
-        stroke_svgs = render_stroke_sequence(char, cell_size=int(stroke_cell))
+        stroke_svgs = render_stroke_sequence(
+            char, cell_size=int(stroke_cell), number_steps=True
+        )
         if stroke_svgs:
             label_baseline = column_low - 10
             c.setFont(label_font, 9.5)
-            c.setFillColor(HexColor("#555555"))
+            c.setFillColor(P.STROKE_CAPTION)
             c.drawString(MARGIN, label_baseline, "Stroke order")
 
             n = len(stroke_svgs)
@@ -730,28 +1123,32 @@ def _draw_character_page(
 
             stroke_low = row0_bottom - (n_rows - 1) * row_h - 6
 
-    # --- Practice grid: cell size matches main character box ---
     cursor_y = stroke_low - 5 * mm
-
     c.setFont(label_font, 11)
-    c.setFillColor(HexColor("#555555"))
+    c.setFillColor(P.STROKE_CAPTION)
     c.drawString(MARGIN, cursor_y, "Practice:")
     cursor_y -= 5 * mm
 
     grid_draw = GRID_FUNCS.get(grid_type, _draw_tian_grid)
-    cell_size, eff_rows = _practice_cell_and_rows(
+    cell_size, eff_rows, req_rows = _practice_cell_and_rows(
         stroke_low, practice_rows, char_box_size
     )
     cells_per_row = max(1, int(usable_w // cell_size))
-    ghost_count = cells_per_row
+    if warnings_out is not None and eff_rows < req_rows:
+        warnings_out.append(
+            f"«{char}»: fit {eff_rows} of {req_rows} practice rows — lower "
+            f"character size or reduce practice rows to use all of them."
+        )
 
+    base_alpha = options.ghost_opacity
     for row in range(eff_rows):
         row_y = cursor_y - cell_size
         if row_y < MARGIN:
             break
+        row_alpha = max(0.0, base_alpha * (1.0 - row * 0.45))
         for col in range(cells_per_row):
             cx = MARGIN + col * cell_size
             grid_draw(c, cx, row_y, cell_size)
-            if row == 0 and col < ghost_count:
-                _draw_ghost_char(c, char, active_font, cx, row_y, cell_size)
+            if row_alpha > 0:
+                _draw_ghost_char(c, char, active_font, cx, row_y, cell_size, alpha=row_alpha)
         cursor_y = row_y - ROW_GAP_PRACTICE

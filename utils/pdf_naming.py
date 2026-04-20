@@ -8,6 +8,7 @@ from utils.segmentation import extract_cjk
 
 _DEFAULT_BASE = "PracticeHanzi"
 _MAX_SLUG_CJK = 3
+_MAX_STEM_LEN = 160
 
 
 def _safe_token(s: str, max_len: int = 40) -> str:
@@ -27,13 +28,30 @@ def _cjk_slug(text: str) -> str:
     return cjk
 
 
+def _pinyin_slug(text: str) -> str:
+    """Tone-less pinyin slug for ASCII-only filenames."""
+    try:
+        from pypinyin import pinyin, Style
+    except Exception:
+        return "sheet"
+    cjk = extract_cjk(text)
+    if not cjk:
+        return "sheet"
+    if len(cjk) > _MAX_SLUG_CJK:
+        cjk = cjk[:_MAX_SLUG_CJK]
+    syls = pinyin(cjk, style=Style.NORMAL, errors="ignore")
+    joined = "".join(s[0] for s in syls if s and s[0]).lower()
+    return _safe_token(joined) if joined else "sheet"
+
+
 def build_practice_hanzi_pdf_filename(
     text: str,
     *,
     source: tuple[str, str | int] | None = None,
+    ascii_only: bool = False,
 ) -> str:
-    """Return e.g. ``PracticeHanzi_你好.pdf``, ``PracticeHanzi_preset_animals_你好.pdf``, ``PracticeHanzi_HSK3_L2_你好.pdf``."""
-    slug = _cjk_slug(text)
+    """Return e.g. ``PracticeHanzi_你好.pdf`` or (ASCII) ``PracticeHanzi_nihao.pdf``."""
+    slug = _pinyin_slug(text) if ascii_only else _cjk_slug(text)
     parts: list[str] = [_DEFAULT_BASE]
 
     if source:
@@ -45,6 +63,6 @@ def build_practice_hanzi_pdf_filename(
             parts.append(f"HSK3_L{int(val)}")
 
     stem = "_".join(parts) + "_" + slug
-    if len(stem) > 160:
-        stem = stem[:160]
+    if len(stem) > _MAX_STEM_LEN:
+        stem = stem[:_MAX_STEM_LEN]
     return stem + ".pdf"
