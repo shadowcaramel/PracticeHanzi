@@ -124,7 +124,9 @@ GRID_FUNCS = {
 PRACTICE_HEADER_BEFORE_GRID = 5 * mm + 5 * mm
 ROW_GAP_PRACTICE = 2 * mm
 PRACTICE_CELL_MIN = 16.0
-BOTTOM_SAFE_PT = 24.0  # leave room for the footer stripe
+BOTTOM_SAFE_PT = 24.0            # leave room for the footer stripe on cover pages
+TRAINING_BOTTOM_SAFE_PT = 6.0    # training pages have no footer — just breathing room
+TRAINING_TOP_RECLAIM_PT = 8.0    # pull content up into the space the header rule used
 COMPACT_METADATA_CHAR_PT = 100
 
 
@@ -162,7 +164,10 @@ def _char_fits_font(font_name: str, char: str) -> bool:
 
 
 def _practice_cell_and_rows(
-    stroke_low: float, practice_rows: int, char_box_cap: float
+    stroke_low: float,
+    practice_rows: int,
+    char_box_cap: float,
+    bottom_safe: float = TRAINING_BOTTOM_SAFE_PT,
 ) -> tuple[float, int, int]:
     """Return ``(cell_size, rows_drawn, rows_requested)``.
 
@@ -175,7 +180,7 @@ def _practice_cell_and_rows(
     Only as a last resort — when a single nominal row cannot fit — do we
     scale the cell down to fit exactly one row.
     """
-    avail = stroke_low - PRACTICE_HEADER_BEFORE_GRID - MARGIN - BOTTOM_SAFE_PT
+    avail = stroke_low - PRACTICE_HEADER_BEFORE_GRID - MARGIN - bottom_safe
     want = max(1, practice_rows)
     nominal = max(PRACTICE_CELL_MIN, char_box_cap)
 
@@ -458,6 +463,80 @@ def _pdf_cache_evict() -> None:
 # ---------------------------------------------------------------------------
 # Cover page (Phase 5a)
 # ---------------------------------------------------------------------------
+def _cover_included_layout(
+    payloads: list[str],
+    avail_w: float,
+    avail_h: float,
+) -> tuple[int, int, float, float, float]:
+    """Choose ``(cols, rows, cell_w, cell_h, char_size)`` for the cover's
+    "Included" grid.
+
+    Goals (in order):
+      1. Pick a cell size large enough to make the showcase visually clear.
+      2. For **few** items scale up so the grid fills roughly a quarter of
+         the vertical budget (capped so single glyphs don't look cartoonish).
+      3. For **many** items use most of the vertical budget but keep glyphs
+         readable; excess items are truncated by the caller.
+      4. Prefer rectangular grids whose aspect is close to the available box.
+    """
+    n = max(1, len(payloads))
+    max_chars = max((len(p) for p in payloads), default=1)
+
+    # Target fraction of available vertical space based on how many items
+    # we need to showcase. A handful of items get airy display; a packed HSK
+    # sample fills the page. These ratios hit the "~25–35% for a few,
+    # ~75–90% for many" brief.
+    if n <= 4:
+        target_frac = 0.28
+    elif n <= 9:
+        target_frac = 0.34
+    elif n <= 20:
+        target_frac = 0.48
+    elif n <= 60:
+        target_frac = 0.68
+    elif n <= 120:
+        target_frac = 0.82
+    else:
+        target_frac = 0.92
+
+    target_h = max(40.0, avail_h * target_frac)
+    gap = 6.0
+
+    CAP = 120.0  # don't make single glyphs cartoonish
+    MIN = 14.0
+    ideal_aspect = (avail_w / target_h) if target_h > 0 else 1.0
+
+    best: tuple[float, int, int, float] | None = None
+    for cols in range(1, n + 1):
+        rows = math.ceil(n / cols)
+        char_w = (avail_w - (cols - 1) * gap) / (cols * max_chars)
+        char_h = (target_h - (rows - 1) * gap) / rows
+        if char_w <= 0 or char_h <= 0:
+            continue
+        char_size = min(char_w, char_h, CAP)
+        if char_size < MIN:
+            # Don't reject outright — caller may truncate — but penalize heavily.
+            penalty = 5.0
+            char_size = MIN
+        else:
+            penalty = 0.0
+
+        grid_w = cols * char_size * max_chars + (cols - 1) * gap
+        grid_h = rows * char_size + (rows - 1) * gap
+        aspect = grid_w / max(1.0, grid_h)
+        aspect_penalty = abs(math.log(aspect) - math.log(ideal_aspect))
+        waste = cols * rows - n
+        score = -char_size + 0.35 * aspect_penalty + 0.015 * waste + penalty
+        if best is None or score < best[0]:
+            best = (score, cols, rows, char_size)
+
+    assert best is not None
+    _, cols, rows, char_size = best
+    cell_w = char_size * max_chars
+    cell_h = char_size
+    return cols, rows, cell_w, cell_h, char_size
+
+
 def _draw_cover_page(
     c: Canvas,
     *,
@@ -466,6 +545,7 @@ def _draw_cover_page(
     options: PdfJobOptions,
     page_total: int,
 ) -> None:
+    # Masthead ----------------------------------------------------------------
     c.setFillColor(P.ACCENT)
     c.rect(0, PAGE_H - 80, PAGE_W, 80, stroke=0, fill=1)
 
@@ -475,6 +555,7 @@ def _draw_cover_page(
     c.setFont(label_font, 11)
     c.drawString(MARGIN, PAGE_H - 68, "Chinese calligraphy training sheets")
 
+    # Meta block --------------------------------------------------------------
     y = PAGE_H - 120
     c.setFillColor(P.INK)
     c.setFont(label_font, 14)
@@ -497,13 +578,7 @@ def _draw_cover_page(
             pass
     y -= 22
 
-    # Item grid — tight and readable.
-    c.setFillColor(P.INK)
-    c.setFont(label_font, 10)
-    c.drawString(MARGIN, y, "Included:")
-    y -= 16
-
-    # Use the calligraphy typeface for item glyphs when available.
+    # Pick a calligraphy typeface for the item glyphs.
     try:
         preview_font = ensure_typeface(
             options.typeface_id or default_typeface_id_for_script("kaishu")
@@ -511,26 +586,86 @@ def _draw_cover_page(
     except Exception:
         preview_font = label_font
 
-    payloads = [p for _, p in items]
-    fs = 14
-    c.setFont(preview_font, fs)
-    col_w = 70
-    line_h = 20
-    x = MARGIN
-    y_cursor = y
-    max_per_line = max(1, int((PAGE_W - 2 * MARGIN) // col_w))
-    for i, p in enumerate(payloads):
-        if y_cursor < MARGIN + 80:
-            c.setFont(label_font, 9)
-            c.setFillColor(P.INK_MUTED)
-            c.drawString(MARGIN, y_cursor, f"… and {len(payloads) - i} more")
-            break
-        col = i % max_per_line
-        if col == 0 and i > 0:
-            y_cursor -= line_h
+    payloads = [p for _, p in items if p]
+
+    # "Included" header -------------------------------------------------------
+    c.setFillColor(P.INK)
+    c.setFont(label_font, 10)
+    c.drawString(MARGIN, y, f"Included ({len(payloads)}):")
+    y -= 10
+
+    if not payloads:
+        return
+
+    # Available box for the showcase grid. Leave ~50 pt at the bottom so
+    # the footer stripe from the page chrome doesn't collide.
+    avail_top = y
+    avail_bottom = MARGIN + 50
+    avail_w = PAGE_W - 2 * MARGIN
+    avail_h = max(80.0, avail_top - avail_bottom)
+
+    cols, rows, cell_w, cell_h, char_size = _cover_included_layout(
+        payloads, avail_w=avail_w, avail_h=avail_h
+    )
+    gap = 6.0
+
+    # Truncate if even with the chosen cell size we can't fit every item.
+    max_rows = max(1, int((avail_h + gap) // (cell_h + gap)))
+    if rows > max_rows:
+        shown_cap = max_rows * cols
+        shown = payloads[:shown_cap]
+        overflow = len(payloads) - shown_cap
+        rows = max_rows
+    else:
+        shown = payloads
+        overflow = 0
+
+    # Center the grid horizontally.
+    grid_w = cols * cell_w + (cols - 1) * gap
+    grid_left = MARGIN + (avail_w - grid_w) / 2
+    grid_top = avail_top - 6  # small padding below "Included:" label
+
+    # Draw subtle tile backgrounds so the rectangle reads as a composed grid.
+    tile_fill = P.PAPER_WARM if hasattr(P, "PAPER_WARM") else None
+    c.setStrokeColor(P.GRID_EDGE)
+    c.setLineWidth(0.4)
+
+    # Font-size probe: shrink per-tile if a phrase is wider than its cell.
+    def _fit_size_for_text(text: str, base: float) -> float:
+        if not text:
+            return base
+        size = base
+        while size > 8.0 and c.stringWidth(text, preview_font, size) > cell_w - 4:
+            size -= 1.0
+        return size
+
+    for i, p in enumerate(shown):
+        r = i // cols
+        col = i % cols
+        x = grid_left + col * (cell_w + gap)
+        y_tile_top = grid_top - r * (cell_h + gap)
+        y_tile_bot = y_tile_top - cell_h
+
+        if tile_fill is not None:
+            c.setFillColor(tile_fill)
+            c.roundRect(x, y_tile_bot, cell_w, cell_h, 3, stroke=1, fill=1)
+
+        fs = _fit_size_for_text(p, char_size)
+        tw = c.stringWidth(p, preview_font, fs)
+        tx = x + (cell_w - tw) / 2
+        ty = y_tile_bot + (cell_h - fs) / 2 + fs * 0.18
         c.setFont(preview_font, fs)
         c.setFillColor(P.INK)
-        c.drawString(MARGIN + col * col_w, y_cursor, p or "·")
+        c.drawString(tx, ty, p)
+
+    if overflow > 0:
+        note_y = grid_top - rows * (cell_h + gap) + gap - 4
+        if note_y > avail_bottom:
+            c.setFont(label_font, 9)
+            c.setFillColor(P.INK_MUTED)
+            c.drawCentredString(
+                PAGE_W / 2, note_y, f"… and {overflow} more on the following pages"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -719,17 +854,9 @@ def generate_pdf(
                     )
             except Exception as exc:
                 _draw_error_page(c, payload=payload, err=str(exc), label_font=ensure_label_font())
-
-            page_pinyin = get_pinyin(payload) if payload else None
-            _draw_page_chrome(
-                c,
-                label_font=ensure_label_font(),
-                script_key=script_key,
-                page_num=page_num,
-                page_total=page_total,
-                page_pinyin=page_pinyin,
-                draw_ribbon=options.all_styles,
-            )
+            # Training pages intentionally omit page chrome (no header/footer) to
+            # maximise the vertical budget available for the practice grid and to
+            # keep the sheets visually uncluttered.
             c.showPage()
 
     _progress(0.98, "Finalizing")
@@ -782,7 +909,7 @@ def _draw_phrase_page(
 
     usable_w = PAGE_W - 2 * MARGIN
     label_font = ensure_label_font()
-    cursor_y = PAGE_H - MARGIN
+    cursor_y = PAGE_H - MARGIN + TRAINING_TOP_RECLAIM_PT
 
     phrase_chars = [ch for ch in phrase if is_cjk(ch)]
     if not phrase_chars:
@@ -1007,7 +1134,7 @@ def _draw_character_page(
 
     usable_w = PAGE_W - 2 * MARGIN
     label_font = ensure_label_font()
-    cursor_y = PAGE_H - MARGIN
+    cursor_y = PAGE_H - MARGIN + TRAINING_TOP_RECLAIM_PT
 
     cursor_y = _draw_script_typeface_header(
         c,
