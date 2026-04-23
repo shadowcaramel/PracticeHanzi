@@ -45,3 +45,7 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP"]
 ignore = ["E501"]
+
+# Google Drive / cross-filesystem installs: avoid hardlink-to-cache (uv warning).
+[tool.uv]
+link-mode = "copy"
