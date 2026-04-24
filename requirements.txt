@@ -1,8 +1,8 @@
-streamlit>=1.56,<2.0
-reportlab>=4.4,<5.0
-svglib>=1.6,<2.0
-pypinyin>=0.55,<1.0
-deep-translator>=1.11,<2.0
+streamlit>=1.56
+reportlab>=4.4
+svglib>=1.6
+pypinyin>=0.55
+deep-translator>=1.11
 requests>=2.32,<3.0
-charset-normalizer>=3.3,<4.0
-Pillow>=12.2,<13.0
+charset-normalizer>=3.3
+Pillow>=12.2
