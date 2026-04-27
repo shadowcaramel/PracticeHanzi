@@ -54,8 +54,8 @@ FONTS_VERSION = "v2"
 PAGE_W, PAGE_H = A4
 MARGIN = 15 * mm
 
-GRID_LIGHT = P.GRID_EDGE
-GRID_MID = P.GRID_CROSS
+# Inner practice-grid guides only (see palette.PRACTICE_GRID_INNER).
+PRACTICE_INNER = P.PRACTICE_GRID_INNER
 GHOST_ALPHA = 0.20
 
 
@@ -67,11 +67,11 @@ ProgressFn = Callable[[float, str], None]
 # ---------------------------------------------------------------------------
 def _draw_tian_grid(c: Canvas, x: float, y: float, size: float) -> None:
     """田字格 (field-character grid)."""
-    c.setStrokeColor(GRID_LIGHT)
+    c.setStrokeColor(P.GRID_EDGE)
     c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
-    c.setStrokeColor(GRID_MID)
-    c.setLineWidth(0.35)
+    c.setStrokeColor(PRACTICE_INNER)
+    c.setLineWidth(0.5)
     c.setDash([1, 3])
     half = size / 2
     c.line(x + half, y, x + half, y + size)
@@ -81,11 +81,11 @@ def _draw_tian_grid(c: Canvas, x: float, y: float, size: float) -> None:
 
 def _draw_mi_grid(c: Canvas, x: float, y: float, size: float) -> None:
     """米字格 (rice-character grid)."""
-    c.setStrokeColor(GRID_LIGHT)
+    c.setStrokeColor(P.GRID_EDGE)
     c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
-    c.setStrokeColor(GRID_MID)
-    c.setLineWidth(0.35)
+    c.setStrokeColor(PRACTICE_INNER)
+    c.setLineWidth(0.5)
     c.setDash([1, 3])
     half = size / 2
     c.line(x + half, y, x + half, y + size)
@@ -97,17 +97,17 @@ def _draw_mi_grid(c: Canvas, x: float, y: float, size: float) -> None:
 
 def _draw_hui_grid(c: Canvas, x: float, y: float, size: float) -> None:
     """回字格: outer square + concentric inner square at 1/6 inset."""
-    c.setStrokeColor(GRID_LIGHT)
+    c.setStrokeColor(P.GRID_EDGE)
     c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
     inset = size / 6.0
-    c.setStrokeColor(GRID_MID)
-    c.setLineWidth(0.5)
+    c.setStrokeColor(PRACTICE_INNER)
+    c.setLineWidth(0.6)
     c.rect(x + inset, y + inset, size - 2 * inset, size - 2 * inset, stroke=1, fill=0)
 
 
 def _draw_plain_grid(c: Canvas, x: float, y: float, size: float) -> None:
-    c.setStrokeColor(GRID_LIGHT)
+    c.setStrokeColor(P.GRID_EDGE)
     c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
 
@@ -302,6 +302,18 @@ def _draw_ghost_char(
     ty = y + (size - font_size) / 2 + font_size * 0.1
     c.drawString(tx, ty, char)
     c.restoreState()
+
+
+def _practice_row_ghost_alpha(row: int, eff_rows: int, base_alpha: float) -> float:
+    """Tracing-guide opacity per practice row.
+
+    The **last** row is never ghosted so at least one full row is freehand,
+    including when vertical space allows only one practice row (large header
+    character). Rows above keep a light downward fade (row 0 strongest).
+    """
+    if eff_rows <= 0 or row >= eff_rows - 1:
+        return 0.0
+    return max(0.0, base_alpha * (1.0 - row * 0.45))
 
 
 # ---------------------------------------------------------------------------
@@ -959,7 +971,7 @@ def _draw_phrase_page(
         c.setFont(active_font, inner_fs)
         tw = c.stringWidth(ch, active_font, inner_fs)
         cx = start_x + i * (char_box_size + gap)
-        c.setStrokeColor(GRID_LIGHT)
+        c.setStrokeColor(P.GRID_EDGE)
         c.setLineWidth(1)
         c.rect(cx, char_box_y, char_box_size, char_box_size, stroke=1, fill=0)
         tx = cx + (char_box_size - tw) / 2
@@ -1095,8 +1107,7 @@ def _draw_phrase_page(
         row_y = cursor_y - cell_size
         if row_y < MARGIN:
             break
-        # Fade ghosts across rows: row0 full, row1 ~60%, row2 ~20%, row3+ none.
-        row_alpha = max(0.0, base_alpha * (1.0 - row * 0.45))
+        row_alpha = _practice_row_ghost_alpha(row, eff_rows, base_alpha)
         for col in range(cells_per_row):
             cx = start_practice_x + col * (cell_size + gap)
             grid_draw(c, cx, row_y, cell_size)
@@ -1152,7 +1163,7 @@ def _draw_character_page(
 
     char_box_x = MARGIN
     char_box_y = cursor_y - char_box_size
-    c.setStrokeColor(GRID_LIGHT)
+    c.setStrokeColor(P.GRID_EDGE)
     c.setLineWidth(1)
     c.rect(char_box_x, char_box_y, char_box_size, char_box_size, stroke=1, fill=0)
 
@@ -1272,7 +1283,7 @@ def _draw_character_page(
         row_y = cursor_y - cell_size
         if row_y < MARGIN:
             break
-        row_alpha = max(0.0, base_alpha * (1.0 - row * 0.45))
+        row_alpha = _practice_row_ghost_alpha(row, eff_rows, base_alpha)
         for col in range(cells_per_row):
             cx = MARGIN + col * cell_size
             grid_draw(c, cx, row_y, cell_size)

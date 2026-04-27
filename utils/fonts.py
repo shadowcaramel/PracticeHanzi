@@ -89,6 +89,19 @@ TYPEFACES: list[dict] = [
         "default_for_script": False,
     },
     {
+        "id": "kaishu_lxgwmarkergothic",
+        "reportlab_name": "LXGWMarkerGothic",
+        "label": "LXGW Marker Gothic",
+        "note": "Marker-pen 楷书 display (霞鹜 LXGW; handwriting style, not 草书)",
+        "filename": "LXGWMarkerGothic-Regular.ttf",
+        "url": (
+            "https://raw.githubusercontent.com/google/fonts/main/ofl/"
+            "lxgwmarkergothic/LXGWMarkerGothic-Regular.ttf"
+        ),
+        "script": "kaishu",
+        "default_for_script": False,
+    },
+    {
         "id": "xingshu_zhimangxing",
         "reportlab_name": "ZhiMangXing",
         "label": "Zhi Mang Xing",
@@ -97,16 +110,6 @@ TYPEFACES: list[dict] = [
         "url": FONT_REGISTRY["xingshu"]["url"],
         "script": "xingshu",
         "default_for_script": True,
-    },
-    {
-        "id": "xingshu_iansui",
-        "reportlab_name": "Iansui",
-        "label": "Iansui 芫荽",
-        "note": "Traditional Chinese pen handwriting (OFL, Google Fonts)",
-        "filename": "Iansui-Regular.ttf",
-        "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/iansui/Iansui-Regular.ttf",
-        "script": "xingshu",
-        "default_for_script": False,
     },
     {
         "id": "caoshu_liujianmaocao",
@@ -119,19 +122,6 @@ TYPEFACES: list[dict] = [
         "default_for_script": True,
     },
     {
-        "id": "caoshu_lxgwmarkergothic",
-        "reportlab_name": "LXGWMarkerGothic",
-        "label": "LXGW Marker Gothic",
-        "note": "Marker-pen handwritten display (霞鹜 LXGW series, OFL on Google Fonts)",
-        "filename": "LXGWMarkerGothic-Regular.ttf",
-        "url": (
-            "https://raw.githubusercontent.com/google/fonts/main/ofl/"
-            "lxgwmarkergothic/LXGWMarkerGothic-Regular.ttf"
-        ),
-        "script": "caoshu",
-        "default_for_script": False,
-    },
-    {
         "id": "lishu_zcoolqingke",
         "reportlab_name": "ZCOOLQingKeHuangYou",
         "label": "ZCOOL QingKe HuangYou 站酷庆科黄油体",
@@ -140,16 +130,6 @@ TYPEFACES: list[dict] = [
         "url": FONT_REGISTRY["lishu"]["url"],
         "script": "lishu",
         "default_for_script": True,
-    },
-    {
-        "id": "lishu_huninn",
-        "reportlab_name": "Huninn",
-        "label": "Huninn 粉圓",
-        "note": "Rounded Traditional Chinese display (justfont / Google Fonts OFL)",
-        "filename": "Huninn-Regular.ttf",
-        "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/huninn/Huninn-Regular.ttf",
-        "script": "lishu",
-        "default_for_script": False,
     },
     {
         "id": "zhuanshu_jfz_seal",

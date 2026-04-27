@@ -5,6 +5,7 @@ data/hsk/
 data/radicals/
 data/mmh/
 data/mmh_idioms/
+data/pdf_cache
 
 # Python
 __pycache__/
@@ -68,3 +69,4 @@ htmlcov/
 
 # Local PDFs / outputs (optional: uncomment if you do not want to track generated sheets)
 *.pdf
+

@@ -33,7 +33,7 @@ class PdfJobOptions:
 
     grid_type: str = "tian"
     practice_rows: int = 3
-    char_size_pt: int = 120
+    char_size_pt: int = 40
 
     compact_metadata: bool = True
     show_mmh_gloss: bool = False

@@ -28,6 +28,7 @@ PRESET_DISPLAY_LABELS: dict[str, str] = {
     "idioms":         "Idioms (成语)",
     "family":         "Family (家人)",
     "home":           "Home (家)",
+    "strokes":        "Strokes (笔画)",
 }
 
 

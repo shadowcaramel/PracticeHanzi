@@ -236,7 +236,7 @@ with st.sidebar:
         )
         practice_rows = st.slider("Practice rows", min_value=1, max_value=6, value=3)
         char_size = st.slider(
-            "Character display size (pt)", min_value=40, max_value=200, value=120, step=5
+            "Character display size (pt)", min_value=40, max_value=200, value=40, step=5
         )
         ghost_opacity = st.slider(
             "Ghost opacity (first row)", min_value=0.0, max_value=0.4, value=0.20, step=0.02,
@@ -302,11 +302,11 @@ if not text_input.strip():
     st.info("Enter text in the sidebar — or try one of these starter examples:")
     cc = st.columns(3)
     with cc[0]:
-        if st.button("Try «你好»", key="ex_nihao", use_container_width=True):
+        if st.button("Try «你好»", key="ex_nihao", width="stretch"):
             queue_text_and_source("你好", None)
             st.rerun()
     with cc[1]:
-        if st.button("Try HSK Level 1", key="ex_hsk1", use_container_width=True):
+        if st.button("Try HSK Level 1", key="ex_hsk1", width="stretch"):
             try:
                 words = sample_hsk_words(1, 24, randomize=True)
                 queue_text_and_source(" ".join(words), ("hsk", 1))
@@ -314,7 +314,7 @@ if not text_input.strip():
             except Exception as e:
                 st.error(str(e))
     with cc[2]:
-        if st.button("Try «画龙点睛»", key="ex_idiom", use_container_width=True):
+        if st.button("Try «画龙点睛»", key="ex_idiom", width="stretch"):
             queue_text_and_source("画龙点睛", None)
             st.rerun()
     st.stop()
@@ -392,7 +392,7 @@ st.divider()
 # ---------------------------------------------------------------------------
 # Generate
 # ---------------------------------------------------------------------------
-if st.button("Generate PDF", type="primary", use_container_width=True):
+if st.button("Generate PDF", type="primary", width="stretch"):
     status = st.status("Preparing…", expanded=False)
     pbar = st.progress(0.0)
 
@@ -447,7 +447,7 @@ if "pdf_bytes" in st.session_state:
         data=st.session_state["pdf_bytes"],
         file_name=st.session_state.get("pdf_name", "PracticeHanzi.pdf"),
         mime="application/pdf",
-        use_container_width=True,
+        width="stretch",
     )
 
     _layout_warnings = st.session_state.get("pdf_layout_warnings") or []
@@ -464,7 +464,7 @@ if "pdf_bytes" in st.session_state:
         try:
             png = _cached_thumbnail(st.session_state["pdf_bytes"])
             if png:
-                st.image(png, caption="Page 1 preview", use_container_width=True)
+                st.image(png, caption="Page 1 preview", width="stretch")
         except Exception:
             pass
     else:

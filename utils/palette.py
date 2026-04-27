@@ -23,6 +23,10 @@ ACCENT_SOFT = HexColor("#4DB6AC")
 GRID_EDGE = HexColor("#B5BCC3")
 GRID_CROSS = HexColor("#DFE4E8")
 
+# Inner grid guides (田/米 dashed mid-lines, 回 inner square): darker than GRID_CROSS
+# so they survive printing; outer cell border stays GRID_EDGE / 0.8 pt.
+PRACTICE_GRID_INNER = HexColor("#6B7280")  # slate-500
+
 GHOST = HexColor("#000000")
 
 PINYIN = HexColor("#1F5F8B")
