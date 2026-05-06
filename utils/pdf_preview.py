@@ -20,7 +20,7 @@ def is_available() -> tuple[bool, str]:
     return True, ""
 
 
-def render_first_page_png(pdf_bytes: bytes, dpi: int = 120, max_px: int = 900) -> bytes | None:
+def render_first_page_png(pdf_bytes: bytes, dpi: int = 200, max_px: int = 2000) -> bytes | None:
     """Return a PNG of page 1 of *pdf_bytes*, or ``None`` on failure."""
     try:
         from pdf2image import convert_from_bytes

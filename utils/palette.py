@@ -32,6 +32,8 @@ GHOST = HexColor("#000000")
 PINYIN = HexColor("#1F5F8B")
 EN = HexColor("#2E6B3A")
 RU = HexColor("#6B3A8A")
+# Second-language translation line (any non-English target).
+SECONDARY_TRANSLATION = HexColor("#5D4E75")
 IDS = HexColor("#8D6E63")
 RADICAL = HexColor("#455A64")
 STROKE_CAPTION = HexColor("#566672")

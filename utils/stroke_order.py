@@ -186,14 +186,16 @@ def render_stroke_step_svg(
     *,
     step_label: int | None = None,
     transformed: bool = False,
+    highlight_hex: str = HIGHLIGHT_COLOR,
 ) -> str:
     """Render an SVG showing strokes[0..up_to-1] in dark, stroke[up_to-1]
-    highlighted in red, and remaining strokes in light gray.
+    highlighted, and remaining strokes in light gray.
 
     When ``step_label`` is given, its integer value is drawn at the top-left
     corner of the SVG — useful for printable order diagrams. ``transformed``
     skips ``_transform_path`` (caller already handled it).
     """
+    hl = highlight_hex if highlight_hex.startswith("#") else f"#{highlight_hex}"
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'width="{size}" height="{size}" '
@@ -205,7 +207,7 @@ def render_stroke_step_svg(
         if i < up_to - 1:
             color = STROKE_COLOR
         elif i == up_to - 1:
-            color = HIGHLIGHT_COLOR
+            color = hl
         else:
             color = STROKE_LIGHT
         parts.append(f'<path d="{d}" fill="{color}" />')
@@ -214,7 +216,7 @@ def render_stroke_step_svg(
         parts.append(
             f'<text x="40" y="160" font-family="sans-serif" '
             f'font-size="180" font-weight="bold" '
-            f'fill="{HIGHLIGHT_COLOR}" opacity="0.85">{step_label}</text>'
+            f'fill="{hl}" opacity="0.85">{step_label}</text>'
         )
 
     parts.append("</svg>")
@@ -226,6 +228,7 @@ def render_stroke_sequence(
     cell_size: int = 80,
     *,
     number_steps: bool = False,
+    highlight_hex: str = HIGHLIGHT_COLOR,
 ) -> list[str] | None:
     """Return a list of SVG strings showing progressive stroke buildup,
     or None if data is unavailable. Pass ``number_steps=True`` to stamp a
@@ -243,6 +246,7 @@ def render_stroke_sequence(
             size=cell_size,
             step_label=step if number_steps else None,
             transformed=True,
+            highlight_hex=highlight_hex,
         )
         for step in range(1, n + 1)
     ]

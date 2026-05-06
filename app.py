@@ -19,6 +19,7 @@ from utils.fonts import (
 )
 from utils.pdf_generator import generate_pdf
 from utils.pdf_options import PdfJobOptions
+from utils.translation import SECONDARY_TRANSLATION_LABELS, SECONDARY_TRANSLATION_TARGETS
 from utils.pdf_preview import is_available as preview_is_available, render_first_page_png
 from utils.presets import (
     list_preset_ids_sorted_by_label,
@@ -41,6 +42,22 @@ from utils.session import (
 )
 
 SCRIPT_ORDER = list(FONT_REGISTRY.keys())
+
+
+def _locale_guess_secondary_lang() -> str | None:
+    """Best-effort browser locale → allowed translation target (not EN/ZH)."""
+    try:
+        loc = getattr(st.context, "locale", None) or ""
+    except Exception:
+        loc = ""
+    if not isinstance(loc, str) or not loc.strip():
+        return None
+    primary = loc.replace("_", "-").split("-")[0].strip().lower()
+    if primary in ("en", "zh"):
+        return None
+    if primary in SECONDARY_TRANSLATION_TARGETS:
+        return primary
+    return None
 
 
 @st.cache_data(show_spinner=False)
@@ -68,7 +85,8 @@ def _current_theme_base() -> str:
 
 @st.cache_data(show_spinner=False)
 def _cached_thumbnail(pdf_bytes: bytes) -> bytes | None:
-    return render_first_page_png(pdf_bytes)
+    # Keep preview crisp even when stretched in wide layouts.
+    return render_first_page_png(pdf_bytes, dpi=220, max_px=2200)
 
 
 if K_MAIN_TEXT not in st.session_state:
@@ -86,6 +104,16 @@ st.markdown(
     .stRadio > div { flex-direction: row; gap: 0.5rem; flex-wrap: wrap; }
     div[data-testid="stExpander"] { border: 1px solid #e0e0e0; border-radius: 8px; }
     .chip-btn button { font-size: 0.9rem; padding: 0.25rem 0.9rem; }
+    .stSidebar img { display: block; margin-left: auto; margin-right: auto; }
+    .st-key-mode_tile_basic button, .st-key-mode_tile_advanced button {
+      min-height: 72px;
+      font-size: 1.02rem;
+      font-weight: 700;
+      border-radius: 12px;
+      width: 100%;
+      white-space: normal;
+      line-height: 1.2;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -106,12 +134,42 @@ st.caption(
 with st.sidebar:
     st.header("Settings")
 
+    if "ui_complexity" not in st.session_state:
+        st.session_state["ui_complexity"] = "Basic"
+
+    st.caption("Mode")
+    mode_col1, mode_col2 = st.columns(2, gap="small")
+    mode_state = st.session_state.get("ui_complexity", "Basic")
+    with mode_col1:
+        if st.button(
+            "Basic",
+            key="mode_tile_basic",
+            type="primary" if mode_state == "Basic" else "secondary",
+            width="stretch",
+            help="Use only common options: text, word banks, script/typeface, grid, rows, size, stroke, pinyin, EN.",
+        ):
+            st.session_state["ui_complexity"] = "Basic"
+            st.rerun()
+    with mode_col2:
+        if st.button(
+            "Advanced",
+            key="mode_tile_advanced",
+            type="primary" if mode_state == "Advanced" else "secondary",
+            width="stretch",
+            help="Includes print tuning, second translation language, extra metadata, and cover/filename controls.",
+        ):
+            st.session_state["ui_complexity"] = "Advanced"
+            st.rerun()
+
+    ui_mode = st.session_state.get("ui_complexity", "Basic")
+    advanced = ui_mode == "Advanced"
+
     apply_pending_text()
 
     with st.expander("Content", expanded=True):
         st.text_area(
             "Chinese text",
-            height=220,
+            height=134,
             key=K_MAIN_TEXT,
             help="Type or paste characters, words, or phrases. Multiple lines or spaces between "
             "segments switch to phrase-style sheets (one page per segment). A single continuous "
@@ -163,11 +221,13 @@ with st.sidebar:
                     st.error(str(e))
 
     with st.expander("Style", expanded=True):
-        all_styles = st.checkbox(
-            "All five scripts (one PDF page per script)",
-            value=False,
-            help="Each practice unit is repeated for 楷 / 行 / 草 / 隶 / 篆 using the typefaces you pick below.",
-        )
+        all_styles = False
+        if advanced:
+            all_styles = st.checkbox(
+                "All five scripts (one PDF page per script)",
+                value=False,
+                help="Each practice unit is repeated for 楷 / 行 / 草 / 隶 / 篆 using the typefaces you pick below.",
+            )
 
         selected_typeface_single = None
         typefaces_by_script = None
@@ -232,26 +292,54 @@ with st.sidebar:
                 "hui": "回字格 (Huí)",
                 "plain": "Plain square",
             }[g],
-            index=0,
+            index=1,
         )
         practice_rows = st.slider("Practice rows", min_value=1, max_value=6, value=3)
         char_size = st.slider(
             "Character display size (pt)", min_value=40, max_value=200, value=40, step=5
         )
-        ghost_opacity = st.slider(
-            "Ghost opacity (first row)", min_value=0.0, max_value=0.4, value=0.20, step=0.02,
-            help="Tracing guide opacity on the top practice row; subsequent rows fade out.",
-        )
-        cover_page = st.checkbox(
-            "Add cover page",
-            value=False,
-            help="Prepends a summary page listing every character/phrase included.",
-        )
-        ascii_filename = st.checkbox(
-            "ASCII filename (broader compatibility)",
-            value=False,
-            help="Replace Chinese characters with a tone-less pinyin slug in the download filename.",
-        )
+        ghost_opacity = 0.20
+        practice_grid_intensity = 1.0
+        cover_page = False
+        ascii_filename = False
+        if advanced:
+            ghost_opacity = st.slider(
+                "Tracing guide opacity",
+                min_value=0.0,
+                max_value=0.4,
+                value=0.20,
+                step=0.02,
+                help="Strongest on the first practice row; fades down each row; the last row is always blank for freehand.",
+            )
+            practice_grid_intensity = st.slider(
+                "Practice grid line strength",
+                min_value=0.65,
+                max_value=1.55,
+                value=1.0,
+                step=0.05,
+                help="Increase if printed grid lines look faint on your printer; decrease if they dominate.",
+            )
+            cover_page = st.checkbox(
+                "Add cover page",
+                value=False,
+                help="Prepends a summary page listing every character/phrase included.",
+            )
+            ascii_filename = st.checkbox(
+                "ASCII filename (broader compatibility)",
+                value=False,
+                help="Replace Chinese characters with a tone-less pinyin slug in the download filename.",
+            )
+
+    show_secondary = False
+    secondary_translation_lang = None
+    stroke_highlight_hex = "#d32f2f"
+    compact_translations = True
+    show_radicals = False
+    show_decomposition = False
+    show_mmh_gloss = False
+
+    if advanced and "secondary_translation_lang_sel" not in st.session_state:
+        st.session_state["secondary_translation_lang_sel"] = _locale_guess_secondary_lang() or "ru"
 
     with st.expander("Extras", expanded=False):
         show_strokes = st.checkbox(
@@ -269,28 +357,47 @@ with st.sidebar:
             st.caption("Stroke diagrams appear only on the 楷书 page for each unit (not on the other four).")
         show_pinyin = st.checkbox("Show pinyin", value=True)
         show_english = st.checkbox("Show English translation", value=True)
-        show_russian = st.checkbox("Show Russian translation", value=True)
-        show_radicals = st.checkbox(
-            "Show radical (部首, BMP CJK)",
-            value=False,
-            help="Uses Unicode Unihan kRSUnicode (downloads Unihan.zip once into data/radicals/).",
-        )
-        show_decomposition = st.checkbox(
-            "Show IDS & character structure (Make Me a Hanzi)",
-            value=False,
-            help="Ideographic Description Sequence (e.g. ⿰女马) plus etymology when present in "
-            "Make Me a Hanzi dictionary.txt (downloads ~1 MB once into data/mmh/).",
-        )
-        compact_translations = st.checkbox(
-            "Compact translations on phrase pages (single row when possible)",
-            value=True,
-            help="At display size ≥100 pt, places Pinyin / EN / RU in one row (three columns).",
-        )
-        show_mmh_gloss = st.checkbox(
-            "Show MMH per-character gloss (phrase pages)",
-            value=False,
-            help="Short English gloss from Make Me a Hanzi per character.",
-        )
+
+        if advanced:
+            st.caption(
+                "Translations use **Google Translate** (via `deep-translator`). They are machine-generated, "
+                "can be inaccurate or misleading, and may not match pedagogical or literary senses."
+            )
+            show_secondary = st.checkbox("Second translation language", value=True)
+            if show_secondary:
+                codes = list(SECONDARY_TRANSLATION_TARGETS)
+                secondary_translation_lang = st.selectbox(
+                    "Language",
+                    options=codes,
+                    format_func=lambda code: SECONDARY_TRANSLATION_LABELS.get(code, code),
+                    key="secondary_translation_lang_sel",
+                )
+            stroke_highlight_hex = st.color_picker(
+                "New stroke highlight (stroke order)",
+                value="#d32f2f",
+                help="Colour for the current step in 楷书 stroke-order diagrams.",
+            )
+            show_radicals = st.checkbox(
+                "Show radical (部首, BMP CJK)",
+                value=False,
+                help="Uses Unicode Unihan kRSUnicode (downloads Unihan.zip once into data/radicals/).",
+            )
+            show_decomposition = st.checkbox(
+                "Show IDS & character structure (Make Me a Hanzi)",
+                value=False,
+                help="Ideographic Description Sequence (e.g. ⿰女马) plus etymology when present in "
+                "Make Me a Hanzi dictionary.txt (downloads ~1 MB once into data/mmh/).",
+            )
+            compact_translations = st.checkbox(
+                "Compact translations on phrase pages (single row when possible)",
+                value=True,
+                help="At display size ≥100 pt, places Pinyin / EN / second language in one row when they fit.",
+            )
+            show_mmh_gloss = st.checkbox(
+                "Show MMH per-character gloss (phrase pages)",
+                value=False,
+                help="Short English gloss from Make Me a Hanzi per character.",
+            )
 
 
 text_input = st.session_state.get(K_MAIN_TEXT, "")
@@ -367,8 +474,10 @@ with col2:
         opts.append("Pinyin")
     if show_english:
         opts.append("EN translation")
-    if show_russian:
-        opts.append("RU translation")
+    if secondary_translation_lang:
+        opts.append(
+            f"{SECONDARY_TRANSLATION_LABELS.get(secondary_translation_lang, secondary_translation_lang)} translation"
+        )
     if show_radicals:
         opts.append("Radicals")
     if show_decomposition:
@@ -415,7 +524,7 @@ if st.button("Generate PDF", type="primary", width="stretch"):
             show_decomposition=show_decomposition,
             show_pinyin=show_pinyin,
             show_english=show_english,
-            show_russian=show_russian,
+            secondary_translation_lang=secondary_translation_lang,
             grid_type=grid_type,
             practice_rows=practice_rows,
             char_size_pt=char_size,
@@ -424,6 +533,8 @@ if st.button("Generate PDF", type="primary", width="stretch"):
             show_mmh_gloss=show_mmh_gloss,
             ghost_opacity=ghost_opacity,
             cover_page=cover_page,
+            practice_grid_intensity=practice_grid_intensity,
+            stroke_highlight_hex=stroke_highlight_hex,
         )
         layout_warnings: list[str] = []
         pdf_bytes = generate_pdf(

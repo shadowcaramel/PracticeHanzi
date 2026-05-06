@@ -33,6 +33,7 @@ from utils.translation import (
     get_translations,
     prefetch_translations,
     save_translation_cache_now,
+    secondary_translation_prefix,
 )
 from utils.radicals import radical_caption
 from utils.decomposition import (
@@ -54,8 +55,6 @@ FONTS_VERSION = "v2"
 PAGE_W, PAGE_H = A4
 MARGIN = 15 * mm
 
-# Inner practice-grid guides only (see palette.PRACTICE_GRID_INNER).
-PRACTICE_INNER = P.PRACTICE_GRID_INNER
 GHOST_ALPHA = 0.20
 
 
@@ -65,12 +64,36 @@ ProgressFn = Callable[[float, str], None]
 # ---------------------------------------------------------------------------
 # Grid styles
 # ---------------------------------------------------------------------------
-def _draw_tian_grid(c: Canvas, x: float, y: float, size: float) -> None:
+def _practice_grid_stroke_colors(intensity: float) -> tuple[Color, Color]:
+    """Practice-cell stroke colours; ``intensity`` 1.0 ≈ palette defaults."""
+    black = Color(0, 0, 0)
+    white = Color(1, 1, 1)
+    outer_base = P.GRID_EDGE
+    inner_base = P.PRACTICE_GRID_INNER
+
+    def lerp(a: Color, b: Color, t: float) -> Color:
+        return Color(
+            a.red + (b.red - a.red) * t,
+            a.green + (b.green - a.green) * t,
+            a.blue + (b.blue - a.blue) * t,
+        )
+
+    clamp_i = max(0.45, min(1.55, float(intensity)))
+    if clamp_i >= 1.0:
+        t = min(1.0, (clamp_i - 1.0) * 0.55)
+        return lerp(outer_base, black, t), lerp(inner_base, black, t)
+    t = min(1.0, (1.0 - clamp_i) * 0.45)
+    return lerp(outer_base, white, t), lerp(inner_base, white, t)
+
+
+def _draw_tian_grid(
+    c: Canvas, x: float, y: float, size: float, *, outer: Color, inner: Color
+) -> None:
     """田字格 (field-character grid)."""
-    c.setStrokeColor(P.GRID_EDGE)
+    c.setStrokeColor(outer)
     c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
-    c.setStrokeColor(PRACTICE_INNER)
+    c.setStrokeColor(inner)
     c.setLineWidth(0.5)
     c.setDash([1, 3])
     half = size / 2
@@ -79,12 +102,14 @@ def _draw_tian_grid(c: Canvas, x: float, y: float, size: float) -> None:
     c.setDash()
 
 
-def _draw_mi_grid(c: Canvas, x: float, y: float, size: float) -> None:
+def _draw_mi_grid(
+    c: Canvas, x: float, y: float, size: float, *, outer: Color, inner: Color
+) -> None:
     """米字格 (rice-character grid)."""
-    c.setStrokeColor(P.GRID_EDGE)
+    c.setStrokeColor(outer)
     c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
-    c.setStrokeColor(PRACTICE_INNER)
+    c.setStrokeColor(inner)
     c.setLineWidth(0.5)
     c.setDash([1, 3])
     half = size / 2
@@ -95,29 +120,38 @@ def _draw_mi_grid(c: Canvas, x: float, y: float, size: float) -> None:
     c.setDash()
 
 
-def _draw_hui_grid(c: Canvas, x: float, y: float, size: float) -> None:
+def _draw_hui_grid(
+    c: Canvas, x: float, y: float, size: float, *, outer: Color, inner: Color
+) -> None:
     """回字格: outer square + concentric inner square at 1/6 inset."""
-    c.setStrokeColor(P.GRID_EDGE)
+    c.setStrokeColor(outer)
     c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
     inset = size / 6.0
-    c.setStrokeColor(PRACTICE_INNER)
+    c.setStrokeColor(inner)
     c.setLineWidth(0.6)
     c.rect(x + inset, y + inset, size - 2 * inset, size - 2 * inset, stroke=1, fill=0)
 
 
-def _draw_plain_grid(c: Canvas, x: float, y: float, size: float) -> None:
-    c.setStrokeColor(P.GRID_EDGE)
+def _draw_plain_grid(c: Canvas, x: float, y: float, size: float, *, outer: Color, inner: Color) -> None:
+    _ = inner
+    c.setStrokeColor(outer)
     c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
 
 
-GRID_FUNCS = {
-    "tian": _draw_tian_grid,
-    "mi": _draw_mi_grid,
-    "hui": _draw_hui_grid,
-    "plain": _draw_plain_grid,
-}
+def _draw_practice_grid_cell(
+    c: Canvas, grid_type: str, x: float, y: float, size: float, *, intensity: float
+) -> None:
+    outer, inner = _practice_grid_stroke_colors(intensity)
+    if grid_type == "mi":
+        _draw_mi_grid(c, x, y, size, outer=outer, inner=inner)
+    elif grid_type == "hui":
+        _draw_hui_grid(c, x, y, size, outer=outer, inner=inner)
+    elif grid_type == "plain":
+        _draw_plain_grid(c, x, y, size, outer=outer, inner=inner)
+    else:
+        _draw_tian_grid(c, x, y, size, outer=outer, inner=inner)
 
 
 # Practice grid: vertical budget.
@@ -330,33 +364,36 @@ def _draw_phrase_metadata_block(
     inner_fs: float,
     show_pinyin: bool,
     show_english: bool,
-    show_russian: bool,
+    secondary_lang: str | None,
     char_size_pt: int,
     compact: bool,
     show_mmh_gloss: bool,
 ) -> float:
     info_line_h = max(14.0, inner_fs * 0.2)
     translations = get_translations(
-        phrase, need_en=show_english, need_ru=show_russian
+        phrase, need_en=show_english, secondary_lang=secondary_lang
     )
     py = get_pinyin(phrase) if show_pinyin else ""
     en = translations.get("en") or ""
-    ru = translations.get("ru") or ""
+    sec = translations.get("secondary") or ""
+    sec_prefix = secondary_translation_prefix(secondary_lang) if secondary_lang else ""
     mmh_line = phrase_mmh_gloss(phrase) if show_mmh_gloss else None
+
+    show_secondary = bool(secondary_lang and sec)
 
     drew_compact = False
     if (
         compact
         and char_size_pt >= COMPACT_METADATA_CHAR_PT
-        and (show_pinyin and py or show_english and en or show_russian and ru)
+        and (show_pinyin and py or show_english and en or show_secondary)
     ):
         pieces: list[tuple[str, HexColor]] = []
         if show_pinyin and py:
             pieces.append((f"Pinyin: {py}", P.PINYIN))
         if show_english and en:
             pieces.append((f"EN: {en}", P.EN))
-        if show_russian and ru:
-            pieces.append((f"RU: {ru}", P.RU))
+        if show_secondary:
+            pieces.append((f"{sec_prefix}: {sec}", P.SECONDARY_TRANSLATION))
         if pieces:
             col_w = usable_w / len(pieces)
             fs = max(7.5, min(9.0, inner_fs * 0.11))
@@ -387,9 +424,9 @@ def _draw_phrase_metadata_block(
             c.setFillColor(P.EN)
             c.drawString(margin_x, info_y - 12, f"EN: {en}")
             info_y -= info_line_h
-        if show_russian and ru:
-            c.setFillColor(P.RU)
-            c.drawString(margin_x, info_y - 12, f"RU: {ru}")
+        if show_secondary:
+            c.setFillColor(P.SECONDARY_TRANSLATION)
+            c.drawString(margin_x, info_y - 12, f"{sec_prefix}: {sec}")
             info_y -= info_line_h
 
     if mmh_line:
@@ -778,7 +815,7 @@ def generate_pdf(
     prefetch_translations(
         texts_for_translation,
         need_en=options.show_english,
-        need_ru=options.show_russian,
+        secondary_lang=options.secondary_translation_lang,
     )
 
     _progress(0.30, "Fetching stroke data")
@@ -912,7 +949,7 @@ def _draw_phrase_page(
     show_decomposition = options.show_decomposition
     show_pinyin = options.show_pinyin
     show_english = options.show_english
-    show_russian = options.show_russian
+    secondary_lang = options.secondary_translation_lang
     grid_type = options.grid_type
     practice_rows = options.practice_rows
     char_size_pt = options.char_size_pt
@@ -971,9 +1008,9 @@ def _draw_phrase_page(
         c.setFont(active_font, inner_fs)
         tw = c.stringWidth(ch, active_font, inner_fs)
         cx = start_x + i * (char_box_size + gap)
-        c.setStrokeColor(P.GRID_EDGE)
-        c.setLineWidth(1)
-        c.rect(cx, char_box_y, char_box_size, char_box_size, stroke=1, fill=0)
+        _draw_practice_grid_cell(
+            c, grid_type, cx, char_box_y, char_box_size, intensity=options.practice_grid_intensity
+        )
         tx = cx + (char_box_size - tw) / 2
         ty = char_box_y + (char_box_size - inner_fs) / 2 + inner_fs * 0.1
         c.drawString(tx, ty, ch)
@@ -1003,7 +1040,7 @@ def _draw_phrase_page(
         inner_fs=inner_fs,
         show_pinyin=show_pinyin,
         show_english=show_english,
-        show_russian=show_russian,
+        secondary_lang=secondary_lang,
         char_size_pt=char_size_pt,
         compact=compact_metadata,
         show_mmh_gloss=show_mmh_gloss,
@@ -1056,7 +1093,10 @@ def _draw_phrase_page(
             label_baseline = y_meta - 3
 
             stroke_svgs = render_stroke_sequence(
-                ch, cell_size=int(stroke_cell), number_steps=True
+                ch,
+                cell_size=int(stroke_cell),
+                number_steps=True,
+                highlight_hex=options.stroke_highlight_hex,
             )
             if not stroke_svgs:
                 stroke_low = label_baseline - 12
@@ -1089,7 +1129,6 @@ def _draw_phrase_page(
     c.drawString(MARGIN, cursor_y, "Practice:")
     cursor_y -= 5 * mm
 
-    grid_draw = GRID_FUNCS.get(grid_type, _draw_tian_grid)
     cell_size, eff_rows, req_rows = _practice_cell_and_rows(
         stroke_low, practice_rows, char_box_size
     )
@@ -1110,7 +1149,9 @@ def _draw_phrase_page(
         row_alpha = _practice_row_ghost_alpha(row, eff_rows, base_alpha)
         for col in range(cells_per_row):
             cx = start_practice_x + col * (cell_size + gap)
-            grid_draw(c, cx, row_y, cell_size)
+            _draw_practice_grid_cell(
+                c, grid_type, cx, row_y, cell_size, intensity=options.practice_grid_intensity
+            )
             if row_alpha > 0:
                 ch = phrase_chars[col % n]
                 active_font = font_name if _char_fits_font(font_name, ch) else fallback_font
@@ -1138,7 +1179,7 @@ def _draw_character_page(
     show_decomposition = options.show_decomposition
     show_pinyin = options.show_pinyin
     show_english = options.show_english
-    show_russian = options.show_russian
+    secondary_lang = options.secondary_translation_lang
     grid_type = options.grid_type
     practice_rows = options.practice_rows
     char_size_pt = options.char_size_pt
@@ -1163,9 +1204,14 @@ def _draw_character_page(
 
     char_box_x = MARGIN
     char_box_y = cursor_y - char_box_size
-    c.setStrokeColor(P.GRID_EDGE)
-    c.setLineWidth(1)
-    c.rect(char_box_x, char_box_y, char_box_size, char_box_size, stroke=1, fill=0)
+    _draw_practice_grid_cell(
+        c,
+        grid_type,
+        char_box_x,
+        char_box_y,
+        char_box_size,
+        intensity=options.practice_grid_intensity,
+    )
 
     tx = char_box_x + (char_box_size - tw) / 2
     ty = char_box_y + (char_box_size - char_size_pt) / 2 + char_size_pt * 0.1
@@ -1211,17 +1257,19 @@ def _draw_character_page(
                 c.drawString(info_x, info_y - 12, dline)
                 info_y -= step
 
-    if show_english or show_russian:
-        translations = get_translations(char, need_en=show_english, need_ru=show_russian)
+    if show_english or secondary_lang:
+        translations = get_translations(char, need_en=show_english, secondary_lang=secondary_lang)
         fs = max(10.0, char_size_pt * 0.095)
+        sec_txt = translations.get("secondary") or ""
+        sec_prefix = secondary_translation_prefix(secondary_lang) if secondary_lang else ""
         c.setFont(label_font, fs)
         if show_english and translations["en"]:
             c.setFillColor(P.EN)
             c.drawString(info_x, info_y - 12, f"EN: {translations['en']}")
             info_y -= info_line_h
-        if show_russian and translations["ru"]:
-            c.setFillColor(P.RU)
-            c.drawString(info_x, info_y - 12, f"RU: {translations['ru']}")
+        if secondary_lang and sec_txt:
+            c.setFillColor(P.SECONDARY_TRANSLATION)
+            c.drawString(info_x, info_y - 12, f"{sec_prefix}: {sec_txt}")
             info_y -= info_line_h
 
     column_low = min(char_box_y, info_y - 18)
@@ -1234,7 +1282,10 @@ def _draw_character_page(
         max_per_row = max(1, int((usable_w + stroke_gap) // (stroke_cell + stroke_gap)))
 
         stroke_svgs = render_stroke_sequence(
-            char, cell_size=int(stroke_cell), number_steps=True
+            char,
+            cell_size=int(stroke_cell),
+            number_steps=True,
+            highlight_hex=options.stroke_highlight_hex,
         )
         if stroke_svgs:
             label_baseline = column_low - 10
@@ -1267,7 +1318,6 @@ def _draw_character_page(
     c.drawString(MARGIN, cursor_y, "Practice:")
     cursor_y -= 5 * mm
 
-    grid_draw = GRID_FUNCS.get(grid_type, _draw_tian_grid)
     cell_size, eff_rows, req_rows = _practice_cell_and_rows(
         stroke_low, practice_rows, char_box_size
     )
@@ -1286,7 +1336,9 @@ def _draw_character_page(
         row_alpha = _practice_row_ghost_alpha(row, eff_rows, base_alpha)
         for col in range(cells_per_row):
             cx = MARGIN + col * cell_size
-            grid_draw(c, cx, row_y, cell_size)
+            _draw_practice_grid_cell(
+                c, grid_type, cx, row_y, cell_size, intensity=options.practice_grid_intensity
+            )
             if row_alpha > 0:
                 _draw_ghost_char(c, char, active_font, cx, row_y, cell_size, alpha=row_alpha)
         cursor_y = row_y - ROW_GAP_PRACTICE

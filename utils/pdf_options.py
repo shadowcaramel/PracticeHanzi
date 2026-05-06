@@ -3,7 +3,7 @@
 Having a single hashable object for the whole job makes it trivial to:
   * key caches (per-option PDF cache, translation prefetch set, Streamlit thumbnail).
   * log / compare two runs.
-  * pass a single value to helpers instead of 15 kwargs.
+  * pass a single value to helpers instead of many kwargs.
 
 ``typefaces_by_script`` is stored as a frozen tuple of pairs so the dataclass
 itself can be hashed. Convert from a ``dict`` via :meth:`PdfJobOptions.from_kwargs`.
@@ -29,7 +29,8 @@ class PdfJobOptions:
     show_decomposition: bool = False
     show_pinyin: bool = True
     show_english: bool = True
-    show_russian: bool = True
+    # Target language code (e.g. ``ru``); ``None`` disables second-language line.
+    secondary_translation_lang: str | None = None
 
     grid_type: str = "tian"
     practice_rows: int = 3
@@ -41,6 +42,12 @@ class PdfJobOptions:
     ghost_opacity: float = 0.20
     cover_page: bool = False
 
+    # Darken (>1) or lighten (<1) practice grid strokes vs palette defaults.
+    practice_grid_intensity: float = 1.0
+
+    # Current stroke highlight in hanzi-writer step diagrams (#RRGGBB).
+    stroke_highlight_hex: str = "#d32f2f"
+
     # Reserved for backward-compatible future options.
     extras: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
@@ -51,6 +58,13 @@ class PdfJobOptions:
         if isinstance(tbs, dict):
             tbs = tuple(sorted(tbs.items()))
         kw["typefaces_by_script"] = tbs
+
+        # Legacy ``show_russian`` → secondary_translation_lang
+        if "show_russian" in kw and "secondary_translation_lang" not in kw:
+            sr = kw.pop("show_russian", False)
+            kw["secondary_translation_lang"] = "ru" if sr else None
+        else:
+            kw.pop("show_russian", None)
 
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in kw.items() if k in known}
