@@ -1,0 +1,10 @@
+# Dependencies needed to run the test suite in CI (and locally with `pytest`).
+# Omits Streamlit and its heavy stack (numpy/pandas/pyarrow/…); no test imports `app.py` or `utils.session`.
+
+reportlab>=4.4
+svglib>=1.6
+pypinyin>=0.55
+deep-translator>=1.11
+requests>=2.32,<3.0
+charset-normalizer>=3.3
+Pillow>=12.2
