@@ -166,6 +166,12 @@ Pillow
 
 ---
 
+## License (this project)
+
+The application source code (`app.py`, `utils/`, `tests/`, `scripts/`), and bundled JSON under `data/presets/`, are licensed under the **GNU General Public License v3.0 or later** (GPL-3.0-or-later).
+
+---
+
 ## Licenses (third-party fonts)
 
 The bundled/downloaded fonts are used under their respective licenses (typically **SIL OFL 1.1** for the Google Fonts families and the seal script project). Keep the font files for personal or commercial use according to each font’s license text shipped with or linked from the upstream repositories.
