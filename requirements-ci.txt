@@ -1,5 +1,8 @@
 # Dependencies needed to run the test suite in CI (and locally with `pytest`).
 # Omits Streamlit and its heavy stack (numpy/pandas/pyarrow/…); no test imports `app.py` or `utils.session`.
+#
+# Linux: svglib pulls pycairo; if pip builds from sdist, install system Cairo first, e.g.
+#   sudo apt-get install -y libcairo2-dev pkg-config
 
 reportlab>=4.4
 svglib>=1.6

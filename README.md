@@ -53,6 +53,8 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+- **Linux (Debian/Ubuntu):** if `pip` fails building **pycairo** (a dependency of **svglib**), install Cairo headers first: `sudo apt-get install -y libcairo2-dev pkg-config`, then retry `pip install`.
+
 **Conda** (optional): create and use any env name you like, for example:
 
 ```bash

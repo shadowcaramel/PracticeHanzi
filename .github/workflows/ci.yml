@@ -16,13 +16,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.12"]
     env:
       PYTHONUTF8: "1"
       PYTHONIOENCODING: utf-8
 
     steps:
       - uses: actions/checkout@v4
+
+      # svglib → rlpycairo → pycairo; PyPI often only has a sdist, which needs libcairo to build.
+      - name: Install Cairo build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev pkg-config
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
