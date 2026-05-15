@@ -50,7 +50,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 PDF_CACHE_DIR = BASE_DIR / "data" / "pdf_cache"
 PDF_CACHE_MAX_BYTES = 200 * 1024 * 1024
 # Bump when font/layout changes should invalidate cached PDFs.
-FONTS_VERSION = "v2"
+FONTS_VERSION = "v3"  # v3: symmetric dotted 米/田 inner guides
 
 PAGE_W, PAGE_H = A4
 MARGIN = 15 * mm
@@ -86,6 +86,46 @@ def _practice_grid_stroke_colors(intensity: float) -> tuple[Color, Color]:
     return lerp(outer_base, white, t), lerp(inner_base, white, t)
 
 
+def _draw_inner_grid_guides(
+    c: Canvas,
+    x: float,
+    y: float,
+    size: float,
+    *,
+    inner: Color,
+    diagonals: bool = False,
+) -> None:
+    """Dotted cross (and optional diagonals) drawn from the cell centre.
+
+    Corner-to-corner dashes on a square look uneven because each edge gets a
+    different dash phase; radiating from ``(cx, cy)`` keeps 米/田 guides symmetric.
+    Round caps turn the short dash period into dots.
+    """
+    c.saveState()
+    c.setStrokeColor(inner)
+    c.setLineWidth(0.5)
+    c.setLineCap(1)
+    c.setLineJoin(1)
+    c.setDash([0.001, 2.6])
+
+    half = size * 0.5
+    cx = x + half
+    cy = y + half
+
+    c.line(cx, y, cx, cy)
+    c.line(cx, cy, cx, y + size)
+    c.line(x, cy, cx, cy)
+    c.line(cx, cy, x + size, cy)
+
+    if diagonals:
+        c.line(cx, cy, x, y)
+        c.line(cx, cy, x + size, y + size)
+        c.line(cx, cy, x + size, y)
+        c.line(cx, cy, x, y + size)
+
+    c.restoreState()
+
+
 def _draw_tian_grid(
     c: Canvas, x: float, y: float, size: float, *, outer: Color, inner: Color
 ) -> None:
@@ -93,13 +133,7 @@ def _draw_tian_grid(
     c.setStrokeColor(outer)
     c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
-    c.setStrokeColor(inner)
-    c.setLineWidth(0.5)
-    c.setDash([1, 3])
-    half = size / 2
-    c.line(x + half, y, x + half, y + size)
-    c.line(x, y + half, x + size, y + half)
-    c.setDash()
+    _draw_inner_grid_guides(c, x, y, size, inner=inner, diagonals=False)
 
 
 def _draw_mi_grid(
@@ -109,15 +143,7 @@ def _draw_mi_grid(
     c.setStrokeColor(outer)
     c.setLineWidth(0.8)
     c.rect(x, y, size, size, stroke=1, fill=0)
-    c.setStrokeColor(inner)
-    c.setLineWidth(0.5)
-    c.setDash([1, 3])
-    half = size / 2
-    c.line(x + half, y, x + half, y + size)
-    c.line(x, y + half, x + size, y + half)
-    c.line(x, y, x + size, y + size)
-    c.line(x, y + size, x + size, y)
-    c.setDash()
+    _draw_inner_grid_guides(c, x, y, size, inner=inner, diagonals=True)
 
 
 def _draw_hui_grid(
@@ -158,10 +184,35 @@ def _draw_practice_grid_cell(
 PRACTICE_HEADER_BEFORE_GRID = 5 * mm + 5 * mm
 ROW_GAP_PRACTICE = 2 * mm
 PRACTICE_CELL_MIN = 16.0
+MIN_CHAR_DISPLAY_PT = 20
+MAX_CHAR_DISPLAY_PT = 200
+# Typical space above practice on a training page (script/typeface header, model cell
+# cushion, stroke-order band, metadata). Tuned on A4 so 20 pt ≈ 15 practice rows.
+_PRACTICE_ABOVE_GRID_TYPICAL_PT = 38.0 + 18.0 + 130.0 + 85.0
 BOTTOM_SAFE_PT = 24.0            # leave room for the footer stripe on cover pages
 TRAINING_BOTTOM_SAFE_PT = 6.0    # training pages have no footer — just breathing room
 TRAINING_TOP_RECLAIM_PT = 8.0    # pull content up into the space the header rule used
 COMPACT_METADATA_CHAR_PT = 100
+
+
+def max_practice_rows_for_char_size(char_size_pt: int) -> int:
+    """Upper bound for the practice-row slider at *char_size_pt*.
+
+    Larger display sizes mean larger nominal cells, so fewer rows fit on A4.
+    At ``MIN_CHAR_DISPLAY_PT`` (20 pt) this is about **15** rows assuming typical
+    content above the grid; the PDF may still draw fewer rows and warn if the
+    page is full.
+    """
+    nominal = max(PRACTICE_CELL_MIN, char_size_pt * 1.15)
+    top_y = PAGE_H - MARGIN + TRAINING_TOP_RECLAIM_PT
+    stroke_low = top_y - _PRACTICE_ABOVE_GRID_TYPICAL_PT - nominal
+    avail = stroke_low - PRACTICE_HEADER_BEFORE_GRID - MARGIN - TRAINING_BOTTOM_SAFE_PT
+    if avail <= nominal:
+        return 1
+    return max(1, int((avail + ROW_GAP_PRACTICE) // (nominal + ROW_GAP_PRACTICE)))
+
+
+PRACTICE_ROWS_SLIDER_MAX = max_practice_rows_for_char_size(MIN_CHAR_DISPLAY_PT)
 
 
 # ---------------------------------------------------------------------------

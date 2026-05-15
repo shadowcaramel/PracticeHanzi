@@ -16,7 +16,7 @@ A small **Streamlit** web application that builds **printable A4 PDF** practice 
 - **Speed** — English and second-language translations run **in parallel** when both are enabled; only requested languages are fetched; stroke JSON is prefetched for all characters in the job.  
 - **Pinyin** via [pypinyin](https://github.com/mozillazg/python-pinyin).  
 - **Translations** via [deep-translator](https://github.com/nidhaloff/deep-translator) (Google Translate backend; requires internet). Machine translations may be wrong; treat them as hints only.  
-- **Grids**: 田字格 (field), 米字格 (rice), or plain square; adjustable practice rows and main character size (slider **40–200 pt**, step **5**).  
+- **Grids**: 田字格 (field), 米字格 (rice), or plain square; adjustable practice rows (up to **~15** at **20 pt** display size) and main character size (slider **20–200 pt**, step **5**).  
 - **Phrase layout** — Practice cell size is **shrunk** if needed so at least one practice row fits below strokes / IDS / translations; requested row count may be reduced if the page is full. **Phrase mode** tiles practice columns in **whole-phrase** widths (e.g. 2 columns for a 2-character phrase when 3 would show only 1.5 repeats).  
 - **Compact translations (phrase pages)** — Optional single-row **Pinyin | EN | second language** (dynamic columns) when display size is **≥100 pt**; falls back to stacked lines if text is too long.  
 - **MMH gloss (phrase pages, optional)** — One line of short **per-character** English glosses from Make Me a Hanzi `dictionary.txt` (not sample sentences).

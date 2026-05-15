@@ -17,7 +17,12 @@ from utils.fonts import (
     style_label,
     typeface_option_label,
 )
-from utils.pdf_generator import generate_pdf
+from utils.pdf_generator import (
+    MIN_CHAR_DISPLAY_PT,
+    MAX_CHAR_DISPLAY_PT,
+    PRACTICE_ROWS_SLIDER_MAX,
+    generate_pdf,
+)
 from utils.pdf_options import PdfJobOptions
 from utils.translation import SECONDARY_TRANSLATION_LABELS, SECONDARY_TRANSLATION_TARGETS
 from utils.pdf_preview import is_available as preview_is_available, render_first_page_png
@@ -298,9 +303,20 @@ with st.sidebar:
             }[g],
             index=1,
         )
-        practice_rows = st.slider("Practice rows", min_value=1, max_value=6, value=3)
+        practice_rows = st.slider(
+            "Practice rows",
+            min_value=1,
+            max_value=PRACTICE_ROWS_SLIDER_MAX,
+            value=min(3, PRACTICE_ROWS_SLIDER_MAX),
+            help=f"Up to {PRACTICE_ROWS_SLIDER_MAX} rows fit on A4 at {MIN_CHAR_DISPLAY_PT} pt with typical headers; "
+            "larger character sizes may fit fewer rows (you will get a layout warning).",
+        )
         char_size = st.slider(
-            "Character display size (pt)", min_value=40, max_value=200, value=40, step=5
+            "Character display size (pt)",
+            min_value=MIN_CHAR_DISPLAY_PT,
+            max_value=MAX_CHAR_DISPLAY_PT,
+            value=40,
+            step=5,
         )
         ghost_opacity = 0.20
         practice_grid_intensity = 1.0
