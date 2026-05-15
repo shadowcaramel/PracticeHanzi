@@ -164,6 +164,10 @@ with st.sidebar:
     ui_mode = st.session_state.get("ui_complexity", "Basic")
     advanced = ui_mode == "Advanced"
 
+    _preview_ok, _preview_why = preview_is_available()
+    if not _preview_ok:
+        st.warning(_preview_why)
+
     apply_pending_text()
 
     with st.expander("Content", expanded=True):
@@ -569,14 +573,18 @@ if "pdf_bytes" in st.session_state:
             + ("\n\n…and more." if len(_layout_warnings) > 12 else "")
         )
 
-    # Optional thumbnail preview (requires pdf2image + poppler).
     ok, why = preview_is_available()
     if ok:
         try:
             png = _cached_thumbnail(st.session_state["pdf_bytes"])
             if png:
                 st.image(png, caption="Page 1 preview", width="stretch")
-        except Exception:
-            pass
+            else:
+                st.warning(
+                    "Page 1 preview could not be rendered. "
+                    "If this persists after redeploy, verify `poppler-utils` is in `packages.txt`."
+                )
+        except Exception as exc:
+            st.warning(f"Page 1 preview failed: {exc}")
     else:
-        st.caption(why)
+        st.warning(why)

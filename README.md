@@ -27,6 +27,7 @@ A small **Streamlit** web application that builds **printable A4 PDF** practice 
 
 - **Python 3.10+**  
 - **Internet** on first run (font downloads, stroke JSON, translations).  
+- **PDF page preview** — `pdf2image` (in `requirements.txt`) plus **Poppler** (`pdftoppm` on PATH). Without Poppler you can still generate and download PDFs, but the in-app thumbnail after **Generate PDF** will not appear.  
 - **Disk**: cached data under `fonts/`, `stroke_cache/`, `data/hsk/`, `data/radicals/` (Unihan when you use radicals), `data/mmh/` (Make Me a Hanzi `dictionary.txt` when you use IDS or MMH gloss), and `data/mmh_idioms/` (only if you run the idiom extractor in `scripts/`), including a ~17 MB **Noto Sans SC** UI font on first PDF generation.
 
 ---
@@ -53,7 +54,11 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-- **Linux (Debian/Ubuntu):** if `pip` fails building **pycairo** (a dependency of **svglib**), install Cairo headers first: `sudo apt-get install -y libcairo2-dev pkg-config`, then retry `pip install`.
+- **Linux (Debian/Ubuntu):** install system packages before or with pip:
+  - **Poppler** (PDF thumbnail preview): `sudo apt-get install -y poppler-utils`
+  - **Cairo** (only if `pip` fails building **pycairo** for **svglib**): `sudo apt-get install -y libcairo2-dev pkg-config`, then retry `pip install`.
+- **macOS:** `brew install poppler` (preview) and, if needed, `brew install cairo pkg-config` (svglib build).
+- **Windows:** install [poppler-windows](https://github.com/oschwartz10612/poppler-windows/releases) and add its `bin` directory to your user **PATH**, then restart the terminal.
 
 **Conda** (optional): create and use any env name you like, for example:
 
@@ -74,6 +79,17 @@ streamlit run app.py
 ```
 
 Then open the URL shown in the terminal (by default **http://localhost:8501**).
+
+### Deploy on Streamlit Community Cloud
+
+The repo root should include:
+
+| File | Purpose |
+|------|---------|
+| `requirements.txt` | Python deps, including `pdf2image` |
+| `packages.txt` | Apt packages: `poppler-utils` (preview), `libcairo2-dev` + `pkg-config` (svglib / pycairo if wheels are unavailable) |
+
+After changing `packages.txt`, **reboot** the app from the Cloud dashboard so apt packages are installed. Do not pass a custom `poppler_path` to `pdf2image` on Cloud — `pdftoppm` is on PATH once `poppler-utils` is installed.
 
 ### How to stop the app
 
